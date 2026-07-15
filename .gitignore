@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# IDE
+.idea/
+
+# 图片数据目录（保留在本地，不推送）
+源文件/
+工程院图片PNG/
+已裁剪照片/
+工程院图片_最终拉平版/
+
+# 导出文件目录
+生成的PPT/
+生成的PPT_v2/
+导出文件/
+
+# 报告文件
+格式转换报告/
+图片数量顺序检查.txt
