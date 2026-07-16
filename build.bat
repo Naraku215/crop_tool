@@ -17,7 +17,7 @@ if not exist ".venv\Scripts\python.exe" (
 
 REM 安装 PyInstaller
 echo [1/4] 安装 PyInstaller...
-.venv\Scripts\pip.exe install pyinstaller >nul 2>&1
+.venv\Scripts\python.exe -m pip install pyinstaller >nul 2>&1
 if errorlevel 1 (
     echo [错误] PyInstaller 安装失败
     pause
@@ -36,7 +36,7 @@ echo.
 
 REM PyInstaller 打包
 echo [3/4] 正在打包 (可能需要几分钟)...
-.venv\Scripts\pyinstaller.exe --noconfirm --windowed --onedir ^
+.venv\Scripts\python.exe -m PyInstaller --noconfirm --windowed --onedir ^
   --name "图片裁剪工具" ^
   --hidden-import pillow_heif ^
   --collect-submodules pillow_heif ^
