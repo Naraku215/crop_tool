@@ -5,11 +5,17 @@
 如需自定义，只需修改本文件中的路径即可。
 """
 
+import sys
 from pathlib import Path
 
 # ============ 路径配置 ============
-# 项目根目录（本文件所在目录）
-PROJECT_ROOT = Path(__file__).parent
+# 项目根目录：打包后为 .exe 所在目录，开发模式为本文件所在目录
+if getattr(sys, 'frozen', False):
+    # PyInstaller 打包后运行
+    PROJECT_ROOT = Path(sys.executable).parent
+else:
+    # 开发模式运行
+    PROJECT_ROOT = Path(__file__).parent
 
 # 源文件目录：存放原始图片（支持 HEIC/JPG/JPEG/BMP/TIFF 等任意格式）
 SOURCE_DIR = PROJECT_ROOT / "源文件"

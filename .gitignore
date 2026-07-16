@@ -2,8 +2,11 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-dist/
+
+# PyInstaller 构建产物
 build/
+dist/
+*.spec
 
 # Virtual environment
 .venv/
