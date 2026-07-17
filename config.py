@@ -1,42 +1,18 @@
 """
-图片裁剪矫正与导出工具 - 集中配置文件
+crop_tool - 集中配置文件
 
-所有路径默认相对于项目根目录，开箱即用。
-如需自定义，只需修改本文件中的路径即可。
+仅包含参数配置，不包含路径。
+路径由用户在 GUI 中动态选择。
 """
 
 import sys
 from pathlib import Path
 
-# ============ 路径配置 ============
-# 项目根目录：打包后为 .exe 所在目录，开发模式为本文件所在目录
+# ============ 项目根目录（用于 PyInstaller 打包） ============
 if getattr(sys, 'frozen', False):
-    # PyInstaller 打包后运行
     PROJECT_ROOT = Path(sys.executable).parent
 else:
-    # 开发模式运行
     PROJECT_ROOT = Path(__file__).parent
-
-# 源文件目录：存放原始图片（支持 HEIC/JPG/JPEG/BMP/TIFF 等任意格式）
-SOURCE_DIR = PROJECT_ROOT / "源文件"
-
-# PNG 格式目录：自动转换格式后的 PNG 图片存放处
-PNG_DIR = PROJECT_ROOT / "工程院图片PNG"
-
-# 已裁剪目录：透视裁剪后的高清 PNG 图片
-CROPPED_DIR = PROJECT_ROOT / "已裁剪照片"
-
-# 最终拉平版目录：水平矫正后的图片
-LEVELED_DIR = PROJECT_ROOT / "工程院图片_最终拉平版"
-
-# 导出目录：生成的 PPT/PDF/Word 文件
-EXPORT_DIR = PROJECT_ROOT / "导出文件"
-
-# 转换报告路径
-CONVERT_REPORT = PROJECT_ROOT / "格式转换报告" / "转换报告.txt"
-
-# 对账检查报告路径
-CHECK_REPORT = PROJECT_ROOT / "图片数量顺序检查.txt"
 
 
 # ============ 裁剪参数 ============
@@ -56,8 +32,13 @@ SLIDE_HEIGHT_INCH = 7.5
 TARGET_VISUAL_RATIO = 4 / 3
 
 
+# ============ GUI 参数 ============
+# 缩略图尺寸（宽, 高）
+THUMBNAIL_SIZE = (120, 90)
+
+
 # ============ 文件格式 ============
-# 支持的图片格式（用于导出时扫描）
+# 支持的图片格式（用于扫描文件夹）
 IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.heic', '.heif'}
 
 # 需要转换为 PNG 的格式（非 PNG 格式）

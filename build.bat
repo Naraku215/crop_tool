@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 echo ========================================
-echo   图片裁剪工具 - 打包脚本
+echo   crop_tool - 打包脚本
 echo ========================================
 echo.
 
@@ -30,14 +30,14 @@ REM 清理旧构建产物
 echo [2/4] 清理旧构建产物...
 if exist "build" rmdir /s /q "build"
 if exist "dist" rmdir /s /q "dist"
-if exist "图片裁剪工具.spec" del /q "图片裁剪工具.spec"
+if exist "crop_tool.spec" del /q "crop_tool.spec"
 echo   完成
 echo.
 
 REM PyInstaller 打包
 echo [3/4] 正在打包 (可能需要几分钟)...
 .venv\Scripts\python.exe -m PyInstaller --noconfirm --windowed --onedir ^
-  --name "图片裁剪工具" ^
+  --name "crop_tool" ^
   --hidden-import pillow_heif ^
   --collect-submodules pillow_heif ^
   --collect-data pillow_heif ^
@@ -55,15 +55,15 @@ echo.
 
 REM 压缩为 zip
 echo [4/4] 压缩为 zip...
-powershell -Command "Compress-Archive -Path 'dist\图片裁剪工具\*' -DestinationPath 'dist\图片裁剪工具-v1.0.zip' -Force"
+powershell -Command "Compress-Archive -Path 'dist\crop_tool\*' -DestinationPath 'dist\crop_tool-v2.3.zip' -Force"
 echo   完成
 echo.
 
 echo ========================================
 echo   打包成功！
 echo ========================================
-echo   输出目录: dist\图片裁剪工具\
-echo   压缩包:   dist\图片裁剪工具-v1.0.zip
+echo   输出目录: dist\crop_tool\
+echo   压缩包:   dist\crop_tool-v2.3.zip
 echo.
 echo   请将 zip 文件上传到 GitHub Releases
 echo ========================================

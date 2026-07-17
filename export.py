@@ -1,10 +1,11 @@
 """
-统一导出模块 - 将图片按顺序导出为 PPT / PDF / Word
+crop_tool - 统一导出模块
 
+将图片按顺序导出为 PPT / PDF / Word。
 所有导出功能共享相同的图片扫描和排序逻辑。
 每个子文件夹生成一个独立的文件（{文件夹名}.pptx/pdf/docx）。
 
-可独立运行：python export.py [ppt|pdf|word|all]
+可独立运行：python export.py <input_dir> <output_dir> [ppt|pdf|word|all]
 """
 
 import sys
@@ -20,20 +21,16 @@ import config
 from utils import scan_speaker_dirs
 
 
-def export_ppt(input_dir=None, output_dir=None, ratio=None):
+def export_ppt(input_dir, output_dir, ratio=None):
     """
     导出为 PPT（每个子文件夹生成一个 .pptx 文件）
 
     参数:
-        input_dir: 输入目录（默认 config.CROPPED_DIR）
-        output_dir: 输出目录（默认 config.EXPORT_DIR）
+        input_dir: 输入目录
+        output_dir: 输出目录
         ratio: 视觉比例矫正（默认 config.TARGET_VISUAL_RATIO）
                16/9 = 铺满整页，4/3 = 居中留白矫正
     """
-    if input_dir is None:
-        input_dir = config.CROPPED_DIR
-    if output_dir is None:
-        output_dir = config.EXPORT_DIR
     if ratio is None:
         ratio = config.TARGET_VISUAL_RATIO
 
@@ -42,7 +39,7 @@ def export_ppt(input_dir=None, output_dir=None, ratio=None):
 
     speaker_dirs = scan_speaker_dirs(input_dir)
     if not speaker_dirs:
-        print("  [错误] 没有找到任何子文件夹或图片，请检查输入目录。")
+        print("  [错误] 没有找到任何图片，请检查输入目录。")
         return
 
     print(f"  共找到 {len(speaker_dirs)} 个文件夹\n")
@@ -65,12 +62,10 @@ def export_ppt(input_dir=None, output_dir=None, ratio=None):
                 slide = prs.slides.add_slide(blank_layout)
 
                 if abs(ratio - 16/9) < 0.01:
-                    # 铺满整页
                     slide.shapes.add_picture(str(img_path), 0, 0,
                                              width=Inches(slide_w),
                                              height=Inches(slide_h))
                 else:
-                    # 按比例居中留白
                     if ratio > slide_ratio:
                         display_width = Inches(slide_w)
                         display_height = Inches(slide_w / ratio)
@@ -95,23 +90,18 @@ def export_ppt(input_dir=None, output_dir=None, ratio=None):
     print("  [完成] PPT 导出完毕！")
 
 
-def export_pdf(input_dir=None, output_dir=None):
+def export_pdf(input_dir, output_dir):
     """
     导出为 PDF（每个子文件夹生成一个 .pdf 文件）
 
     使用 Pillow 的 Image.save(save_all=True) 功能，无需额外依赖。
     """
-    if input_dir is None:
-        input_dir = config.CROPPED_DIR
-    if output_dir is None:
-        output_dir = config.EXPORT_DIR
-
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     speaker_dirs = scan_speaker_dirs(input_dir)
     if not speaker_dirs:
-        print("  [错误] 没有找到任何子文件夹或图片，请检查输入目录。")
+        print("  [错误] 没有找到任何图片，请检查输入目录。")
         return
 
     print(f"  共找到 {len(speaker_dirs)} 个文件夹\n")
@@ -140,23 +130,18 @@ def export_pdf(input_dir=None, output_dir=None):
     print("  [完成] PDF 导出完毕！")
 
 
-def export_word(input_dir=None, output_dir=None):
+def export_word(input_dir, output_dir):
     """
     导出为 Word（每个子文件夹生成一个 .docx 文件）
 
     使用 python-docx，每张图片占一页。
     """
-    if input_dir is None:
-        input_dir = config.CROPPED_DIR
-    if output_dir is None:
-        output_dir = config.EXPORT_DIR
-
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     speaker_dirs = scan_speaker_dirs(input_dir)
     if not speaker_dirs:
-        print("  [错误] 没有找到任何子文件夹或图片，请检查输入目录。")
+        print("  [错误] 没有找到任何图片，请检查输入目录。")
         return
 
     print(f"  共找到 {len(speaker_dirs)} 个文件夹\n")
@@ -165,16 +150,13 @@ def export_word(input_dir=None, output_dir=None):
         print(f"  [{speaker_name}] {len(images)} 张图片")
 
         doc = Document()
-        # 设置页面为横向，以适应宽屏图片
         section = doc.sections[0]
         section.orientation = WD_ORIENT.LANDSCAPE
-        # 横向时需要交换宽高
         section.page_width, section.page_height = section.page_height, section.page_width
 
         for idx, img_path in enumerate(images, 1):
             print(f"    {idx}/{len(images)}  {img_path.name}")
             try:
-                # 图片宽度设为页面可用宽度（页面宽 - 左右边距）
                 pic_width = section.page_width - section.left_margin - section.right_margin
                 doc.add_picture(str(img_path), width=pic_width)
                 if idx < len(images):
@@ -190,21 +172,27 @@ def export_word(input_dir=None, output_dir=None):
 
 
 if __name__ == "__main__":
-    fmt = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if len(sys.argv) >= 4:
+        input_dir = sys.argv[1]
+        output_dir = sys.argv[2]
+        fmt = sys.argv[3]
+    else:
+        print("用法: python export.py <input_dir> <output_dir> [ppt|pdf|word|all]")
+        sys.exit(1)
 
     print("=" * 50)
     print("  图片导出工具 (PPT / PDF / Word)")
     print("=" * 50)
-    print(f"  输入目录: {config.CROPPED_DIR}")
-    print(f"  输出目录: {config.EXPORT_DIR}")
+    print(f"  输入目录: {input_dir}")
+    print(f"  输出目录: {output_dir}")
     print("=" * 50)
 
     if fmt in ("ppt", "all"):
         print("\n--- 导出 PPT ---")
-        export_ppt()
+        export_ppt(input_dir, output_dir)
     if fmt in ("pdf", "all"):
         print("\n--- 导出 PDF ---")
-        export_pdf()
+        export_pdf(input_dir, output_dir)
     if fmt in ("word", "all"):
         print("\n--- 导出 Word ---")
-        export_word()
+        export_word(input_dir, output_dir)
