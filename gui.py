@@ -20,8 +20,17 @@ import level
 import export
 from utils import scan_images, read_image_pil, pil_to_cv2, cv2_to_pil, save_image_cv2
 
-VERSION = "v2.3"
+VERSION = "v2.4"
 OUTPUT_SUBDIR = "crop_tool_已处理"
+
+# ============================== 交互参数 ==============================
+HANDLE_R    = 7       # 标记点句柄半径（画布像素）
+HANDLE_HIT  = 12      # 命中拖拽的判定半径（画布像素）
+ZOOM_MIN    = 0.2
+ZOOM_MAX    = 8.0
+ZOOM_STEP   = 1.25
+LOUPE_SIZE  = 130     # 放大镜边长（画布像素）
+LOUPE_ZOOM  = 4       # 放大倍数
 
 # ============================== 色彩体系 ==============================
 BG_MAIN     = '#0f1117'
@@ -49,7 +58,7 @@ FONT_SMALL  = ('Microsoft YaHei UI', 8)
 FONT_TITLE  = ('Microsoft YaHei UI', 13, 'bold')
 FONT_STATUS = ('Microsoft YaHei UI', 13, 'bold')
 FONT_HDR    = ('Microsoft YaHei UI', 9, 'bold')
-FONT_LOG    = ('Consolas', 9)
+FONT_LOG    = ('Consolas', 11)
 
 
 class ColoredLogRedirector:
@@ -103,10 +112,22 @@ class App:
         self.image_list = []
         self.current_idx = -1
         self.mode = None
-        self.points = []
-        self.canvas_scale = 1.0
+        self.points = []              # 存原图坐标 (x, y)
+        self.canvas_scale = 1.0       # 有效缩放 = fit_scale * user_zoom
         self.display_offset_x = 0
         self.display_offset_y = 0
+        self.fit_scale = 1.0
+        self.user_zoom = 1.0
+        self.pan_x = 0
+        self.pan_y = 0
+        self.selected_point = -1      # 当前选中的标记点索引
+        self.dragging_point = -1      # 正在拖拽的标记点索引
+        self.panning = False
+        self.space_held = False
+        self._pan_start = None
+        self.undo_stack = []
+        self.redo_stack = []
+        self.last_points = None       # (mode, [pts]) 记忆上一张
         self.original_img = None
         self.preview_result = None
         self.processed_set = set()
@@ -125,12 +146,14 @@ class App:
         sys.stdout = ColoredLogRedirector(self.log_text)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind('<KeyPress>', self._on_keypress)
+        self.root.bind('<KeyRelease-space>', self._on_space_release)
 
         self._show_canvas_hint()
         self._update_status_bar()
         print("crop_tool " + VERSION)
         print("=" * 50)
-        print("快捷键: Enter=保存  S=跳过  B=上一张  N=跳过文件夹  R=重画  1=裁剪  2=矫正  Esc=返回原图  Q=退出")
+        print("快捷键: Enter=保存 S=跳过 B=上一张 N=跳过文件夹 R=重画 A=套用文件夹 P=粘贴点")
+        print("        1=裁剪 2=矫正 Ctrl+Z/Y=撤销/重做 方向键=微调 滚轮/+/-/0=缩放 空格拖拽=平移")
 
     # ============================== 样式 ==============================
 
@@ -234,7 +257,19 @@ class App:
         self.image_canvas = tk.Canvas(cf, bg=BG_INPUT, highlightthickness=0, bd=0)
         self.image_canvas.pack(fill='both', expand=True, padx=1, pady=1)
         self.image_canvas.bind('<Button-1>', self._on_canvas_click)
+        self.image_canvas.bind('<B1-Motion>', self._on_canvas_drag)
+        self.image_canvas.bind('<ButtonRelease-1>', self._on_canvas_release)
+        self.image_canvas.bind('<Motion>', self._on_canvas_motion)
+        self.image_canvas.bind('<Button-2>', self._on_pan_start)
+        self.image_canvas.bind('<B2-Motion>', self._on_pan_move)
+        self.image_canvas.bind('<MouseWheel>', self._on_canvas_wheel)
         self.image_canvas.bind('<Configure>', lambda e: self._on_canvas_resize())
+        self.image_canvas.bind('<Leave>', lambda e: self._hide_loupe())
+
+        # 放大镜浮层（默认隐藏，随光标显示）
+        self.loupe = tk.Canvas(self.image_canvas, width=LOUPE_SIZE, height=LOUPE_SIZE,
+                               bg=BG_INPUT, highlightthickness=1, highlightbackground=ACCENT, bd=0)
+        self.loupe_photo = None
 
         abar = ttk.Frame(center)
         abar.pack(fill='x', pady=(6, 0))
@@ -247,7 +282,9 @@ class App:
         self.btn_prev  = ttk.Button(abar, text=" 上一张 [B] ", command=self.prev_image)
         self.btn_prev.pack(side='left', padx=(0, 5))
         self.btn_next  = ttk.Button(abar, text=" 下一张 [N] ", command=self.next_image)
-        self.btn_next.pack(side='left')
+        self.btn_next.pack(side='left', padx=(0, 5))
+        self.btn_apply = ttk.Button(abar, text=" 套用到本文件夹 [A] ", command=self.apply_to_folder)
+        self.btn_apply.pack(side='left')
 
         # 右：已处理
         right = ttk.Frame(main)
@@ -295,9 +332,10 @@ class App:
 
         logf = ttk.LabelFrame(bottom, text="日志", padding=(8, 5))
         logf.pack(fill='x')
-        self.log_text = tk.Text(logf, height=3, font=FONT_LOG, wrap='word',
+        self.log_text = tk.Text(logf, height=4, font=FONT_LOG, wrap='word',
                                 bg=BG_INPUT, fg=TEXT_MAIN, insertbackground=TEXT_MAIN,
-                                state='normal', highlightthickness=0, bd=0, padx=6, pady=4)
+                                state='normal', highlightthickness=0, bd=0, padx=8, pady=6,
+                                spacing1=2, spacing3=2)
         ls = ttk.Scrollbar(logf, orient='vertical', command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=ls.set)
         ls.pack(side='right', fill='y')
@@ -311,7 +349,7 @@ class App:
 
         self.all_buttons = [
             self.btn_crop, self.btn_level, self.btn_clear,
-            self.btn_save, self.btn_skip, self.btn_prev, self.btn_next,
+            self.btn_save, self.btn_skip, self.btn_prev, self.btn_next, self.btn_apply,
             self.btn_ppt, self.btn_pdf, self.btn_word, self.btn_open,
         ]
 
@@ -347,13 +385,22 @@ class App:
                 '点击一条应为水平的线：先点左端，再点右端',
                 '程序自动计算倾斜角度并旋转矫正',
             ]),
+            ('精细编辑', [
+                '标记点可直接拖拽微调，选中后可用方向键像素级移动（Shift 为 10px）',
+                '滚轮缩放、空格或中键拖拽平移，配合放大镜精确点选',
+                '同机位连拍：标好一张后按 A 一键套用到本文件夹剩余图片',
+                '按 P 可粘贴上一张的标记点作为起点，Ctrl+Z/Y 撤销/重做',
+            ]),
             ('快捷键', [
                 'Enter = 保存当前        S = 跳过当前',
                 'B = 上一张              N = 跳过整个文件夹',
-                'R = 重画（清除标记点）',
-                '1 = 裁剪模式            2 = 矫正模式',
-                'Esc = 返回原图 / 清除标记点',
-                'Q = 退出程序',
+                'R = 重画（清除标记点）   A = 套用到本文件夹剩余',
+                'P = 粘贴上次标记点       1 = 裁剪模式   2 = 矫正模式',
+                'Ctrl+Z = 撤销           Ctrl+Y = 重做',
+                '方向键 = 微调选中点（Shift 为 10px）',
+                '滚轮 = 缩放    + / - = 缩放    0 = 复位视图',
+                '空格+拖拽 或 中键拖拽 = 平移画布',
+                'Esc = 返回原图 / 清除标记点    Q = 退出程序',
             ]),
             ('保存与导出', [
                 '每张处理后立即保存到「保存位置」显示的文件夹',
@@ -393,13 +440,13 @@ class App:
             color = YELLOW
         elif self.mode == 'crop':
             if len(self.points) == 4:
-                text = f"裁剪  {self.current_idx+1}/{len(self.image_list)}  —  4 个点已标记，按 Enter 保存 / R 重画"
+                text = f"裁剪  {self.current_idx+1}/{len(self.image_list)}  —  4 个点已标记，可拖拽/方向键微调，Enter 保存 / A 套用整个文件夹 / R 重画"
             else:
                 text = f"裁剪  {self.current_idx+1}/{len(self.image_list)}  —  依次点击 4 个角点（左上→右上→右下→左下），还需 {4-len(self.points)} 个"
             color = ACCENT
         else:  # level
             if self.preview_result is not None:
-                text = f"矫正  {self.current_idx+1}/{len(self.image_list)}  —  已预览，按 Enter 保存 / R 重画"
+                text = f"矫正  {self.current_idx+1}/{len(self.image_list)}  —  已预览，可拖拽端点微调，Enter 保存 / A 套用整个文件夹 / R 重画"
             elif len(self.points) == 1:
                 text = f"矫正  {self.current_idx+1}/{len(self.image_list)}  —  再点击水平线的右端点"
             else:
@@ -421,10 +468,24 @@ class App:
     # ============================== 快捷键 ==============================
 
     def _on_keypress(self, event):
-        if event.state & 0x4:
-            return
+        ctrl = bool(event.state & 0x4)
+        shift = bool(event.state & 0x1)
         key = event.keysym.lower()
         char = event.char.lower()
+
+        if ctrl:
+            if key == 'z':
+                self.redo() if shift else self.undo()
+            elif key == 'y':
+                self.redo()
+            return
+
+        if key in ('left', 'right', 'up', 'down'):
+            self._nudge_selected(key, event.state)
+            return
+        if key == 'space':
+            self.space_held = True
+            return
 
         if key == 'escape':
             if self.viewing_result:
@@ -433,6 +494,14 @@ class App:
                 self.clear_points()
         elif key == 'return':
             self.save_current()
+        elif char in ('+', '='):
+            self._apply_zoom(ZOOM_STEP, self._cx(), self._cy())
+        elif char == '-':
+            self._apply_zoom(1 / ZOOM_STEP, self._cx(), self._cy())
+        elif char == '0':
+            self._reset_view()
+            self._redisplay_current()
+            self._update_status_bar()
         elif char == 's':
             self.skip_current()
         elif char == 'b':
@@ -441,12 +510,27 @@ class App:
             self.skip_folder()
         elif char == 'r':
             self.clear_points()
+        elif char == 'a':
+            self.apply_to_folder()
+        elif char == 'p':
+            self.paste_last_points()
         elif char == '1':
             self.set_mode('crop')
         elif char == '2':
             self.set_mode('level')
         elif char == 'q':
             self._on_close()
+
+    def _on_space_release(self, event):
+        self.space_held = False
+        self.panning = False
+        self._pan_start = None
+
+    def _cx(self):
+        return (self.image_canvas.winfo_width() or 800) // 2
+
+    def _cy(self):
+        return (self.image_canvas.winfo_height() or 600) // 2
 
     # ============================== 文件夹与缩略图 ==============================
 
@@ -550,6 +634,12 @@ class App:
         self.current_idx = idx
         self.points = []
         self.preview_result = None
+        self.selected_point = -1
+        self.dragging_point = -1
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self._reset_view()
+        self._hide_loupe()
 
         img_info = self.image_list[idx]
         print(f"  [{idx + 1}/{len(self.image_list)}] {img_info['name']}")
@@ -583,11 +673,12 @@ class App:
         if cw < 10: cw = 800
         if ch < 10: ch = 600
 
-        scale = min(cw / w, ch / h, 1.0)
+        self.fit_scale = min(cw / w, ch / h, 1.0)
+        scale = self.fit_scale * self.user_zoom
         dw, dh = max(1, int(w * scale)), max(1, int(h * scale))
         self.canvas_scale = scale
-        self.display_offset_x = max(0, (cw - dw) // 2)
-        self.display_offset_y = max(0, (ch - dh) // 2)
+        self.display_offset_x = (cw - dw) // 2 + self.pan_x
+        self.display_offset_y = (ch - dh) // 2 + self.pan_y
 
         pil_disp = pil_img.resize((dw, dh), Image.LANCZOS)
         self.current_photo = ImageTk.PhotoImage(pil_disp)
@@ -603,10 +694,30 @@ class App:
         if self.viewing_result:
             self._exit_result_preview()
             return
+        if self.original_img is None:
+            return
+
+        # 空格 + 左键 = 平移
+        if self.space_held:
+            self.panning = True
+            self._pan_start = (event.x, event.y, self.pan_x, self.pan_y)
+            return
+
+        # 命中已有标记点 -> 拖拽微调
+        hit = self._hit_test_point(event.x, event.y)
+        if hit >= 0:
+            self._push_undo()
+            self.dragging_point = hit
+            self.selected_point = hit
+            if self.mode == 'level' and self.preview_result is not None:
+                self.preview_result = None
+                self._display_cv2_image(self.original_img)
+            self._draw_overlay()
+            self._show_loupe(event.x, event.y)
+            return
+
         if self.mode is None:
             print("  [提示] 请先选择模式 (1=裁剪 2=矫正)")
-            return
-        if self.original_img is None:
             return
         if self.preview_result is not None:
             return
@@ -615,41 +726,234 @@ class App:
         if len(self.points) >= max_pts:
             return
 
-        self.points.append((event.x, event.y))
+        self._push_undo()
+        self.points.append(self._canvas_to_image_point((event.x, event.y)))
+        self.selected_point = len(self.points) - 1
         self._draw_overlay()
 
         if self.mode == 'crop' and len(self.points) == 4:
-            print("  [提示] 4个点已标记，按 Enter 保存，R 重画")
+            self._hide_loupe()
+            print("  [提示] 4个点已标记，可拖拽微调，按 Enter 保存，R 重画")
         elif self.mode == 'level' and len(self.points) == 2:
+            self._hide_loupe()
             self._show_level_preview()
 
         self._update_status_bar()
 
+    def _on_canvas_drag(self, event):
+        if self.panning:
+            if self._pan_start:
+                sx, sy, px, py = self._pan_start
+                self.pan_x = px + (event.x - sx)
+                self.pan_y = py + (event.y - sy)
+                self._redisplay_current()
+            return
+        if self.dragging_point >= 0:
+            self.points[self.dragging_point] = self._canvas_to_image_point((event.x, event.y))
+            self._draw_overlay()
+            self._show_loupe(event.x, event.y)
+
+    def _on_canvas_release(self, event):
+        if self.panning:
+            self.panning = False
+            self._pan_start = None
+            return
+        if self.dragging_point >= 0:
+            self.dragging_point = -1
+            self._hide_loupe()
+            if self.mode == 'level' and len(self.points) == 2:
+                self._show_level_preview()
+            self._update_status_bar()
+
+    def _on_canvas_motion(self, event):
+        if self.viewing_result or self.original_img is None or self.mode is None:
+            self._hide_loupe()
+            return
+        if self.dragging_point >= 0 or self.panning:
+            return
+        max_pts = 4 if self.mode == 'crop' else 2
+        if len(self.points) < max_pts and self.preview_result is None:
+            self._show_loupe(event.x, event.y)
+        else:
+            self._hide_loupe()
+
+    def _on_pan_start(self, event):
+        self._pan_start = (event.x, event.y, self.pan_x, self.pan_y)
+
+    def _on_pan_move(self, event):
+        if not self._pan_start:
+            return
+        sx, sy, px, py = self._pan_start
+        self.pan_x = px + (event.x - sx)
+        self.pan_y = py + (event.y - sy)
+        self._redisplay_current()
+
+    def _on_canvas_wheel(self, event):
+        if self.viewing_result or self.original_img is None:
+            return
+        factor = ZOOM_STEP if event.delta > 0 else 1 / ZOOM_STEP
+        self._apply_zoom(factor, event.x, event.y)
+
+    def _apply_zoom(self, factor, cx, cy):
+        if self.original_img is None:
+            return
+        new_zoom = max(ZOOM_MIN, min(ZOOM_MAX, self.user_zoom * factor))
+        if abs(new_zoom - self.user_zoom) < 1e-6:
+            return
+        # 以光标为锚点，保持锚点下的原图位置不动
+        ix, iy = self._canvas_to_image_point((cx, cy))
+        self.user_zoom = new_zoom
+        h, w = self.original_img.shape[:2]
+        cw = self.image_canvas.winfo_width() or 800
+        ch = self.image_canvas.winfo_height() or 600
+        scale = self.fit_scale * self.user_zoom
+        dw, dh = int(w * scale), int(h * scale)
+        self.pan_x = int(cx - ix * scale - (cw - dw) // 2)
+        self.pan_y = int(cy - iy * scale - (ch - dh) // 2)
+        self._redisplay_current()
+        self._update_status_bar()
+
+    def _reset_view(self):
+        self.user_zoom = 1.0
+        self.pan_x = 0
+        self.pan_y = 0
+
+    def _redisplay_current(self):
+        if self.original_img is None:
+            return
+        img = self.preview_result if self.preview_result is not None else self.original_img
+        self._display_cv2_image(img)
+
+    def _hit_test_point(self, cx, cy):
+        best, best_d = -1, HANDLE_HIT
+        for i, p in enumerate(self.points):
+            px, py = self._image_to_canvas_point(p)
+            d = ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
+            if d <= best_d:
+                best, best_d = i, d
+        return best
+
     def _draw_overlay(self):
         self.image_canvas.delete('overlay')
-        for i, pt in enumerate(self.points):
-            self.image_canvas.create_oval(pt[0]-6, pt[1]-6, pt[0]+6, pt[1]+6,
-                                          fill=RED, outline='white', width=2, tags='overlay')
-            if i > 0:
-                prev = self.points[i-1]
-                self.image_canvas.create_line(prev[0], prev[1], pt[0], pt[1],
-                                              fill=GREEN, width=2, tags='overlay')
-        if self.mode == 'crop' and len(self.points) == 4:
-            self.image_canvas.create_line(self.points[3][0], self.points[3][1],
-                                          self.points[0][0], self.points[0][1],
+        cpts = [self._image_to_canvas_point(p) for p in self.points]
+        for i in range(1, len(cpts)):
+            self.image_canvas.create_line(cpts[i-1][0], cpts[i-1][1], cpts[i][0], cpts[i][1],
                                           fill=GREEN, width=2, tags='overlay')
+        if self.mode == 'crop' and len(cpts) == 4:
+            self.image_canvas.create_line(cpts[3][0], cpts[3][1], cpts[0][0], cpts[0][1],
+                                          fill=GREEN, width=2, tags='overlay')
+        for i, (cx, cy) in enumerate(cpts):
+            sel = (i == self.selected_point)
+            r = HANDLE_R + (2 if sel else 0)
+            self.image_canvas.create_oval(cx-r, cy-r, cx+r, cy+r,
+                                          fill=(YELLOW if sel else RED),
+                                          outline='white', width=2, tags='overlay')
+            self.image_canvas.create_text(cx, cy-r-8, text=str(i+1),
+                                          fill='white', font=FONT_SMALL, tags='overlay')
+
+    def _image_to_canvas_point(self, pt):
+        return (pt[0] * self.canvas_scale + self.display_offset_x,
+                pt[1] * self.canvas_scale + self.display_offset_y)
 
     def _canvas_to_image_point(self, pt):
         return ((pt[0] - self.display_offset_x) / self.canvas_scale,
                 (pt[1] - self.display_offset_y) / self.canvas_scale)
 
+    def _show_loupe(self, cx, cy):
+        if self.original_img is None:
+            return
+        ix, iy = self._canvas_to_image_point((cx, cy))
+        h, w = self.original_img.shape[:2]
+        src = max(4, LOUPE_SIZE // LOUPE_ZOOM)   # 源区域边长（原图像素）
+        x0 = int(ix - src / 2)
+        y0 = int(iy - src / 2)
+        x0 = max(0, min(x0, w - src)) if w > src else 0
+        y0 = max(0, min(y0, h - src)) if h > src else 0
+        crop = self.original_img[y0:y0 + src, x0:x0 + src]
+        if crop.size == 0:
+            self._hide_loupe()
+            return
+        pil = cv2_to_pil(crop).resize((LOUPE_SIZE, LOUPE_SIZE), Image.NEAREST)
+        self.loupe_photo = ImageTk.PhotoImage(pil)
+        self.loupe.delete('all')
+        self.loupe.create_image(0, 0, anchor='nw', image=self.loupe_photo)
+        rel_x = (ix - x0) / src * LOUPE_SIZE
+        rel_y = (iy - y0) / src * LOUPE_SIZE
+        self.loupe.create_line(rel_x, 0, rel_x, LOUPE_SIZE, fill=ACCENT, width=1)
+        self.loupe.create_line(0, rel_y, LOUPE_SIZE, rel_y, fill=ACCENT, width=1)
+        self.loupe.create_oval(rel_x-4, rel_y-4, rel_x+4, rel_y+4, outline=RED, width=2)
+        # 定位：默认光标右下，靠近边缘时翻到对侧
+        cw = self.image_canvas.winfo_width() or 800
+        ch = self.image_canvas.winfo_height() or 600
+        lx = cx + 20 if cx + 20 + LOUPE_SIZE <= cw else cx - 20 - LOUPE_SIZE
+        ly = cy + 20 if cy + 20 + LOUPE_SIZE <= ch else cy - 20 - LOUPE_SIZE
+        self.loupe.place(x=max(0, lx), y=max(0, ly))
+
+    def _hide_loupe(self):
+        if getattr(self, 'loupe', None) is not None:
+            self.loupe.place_forget()
+
     def _show_level_preview(self):
-        pa = self._canvas_to_image_point(self.points[0])
-        pb = self._canvas_to_image_point(self.points[1])
+        pa = self.points[0]
+        pb = self.points[1]
         print(f"  [检测] 倾斜角度: {level.get_angle(pa, pb):.2f} 度")
         self.preview_result = level.apply_level(self.original_img, pa, pb)
         self._display_cv2_image(self.preview_result)
         print("  [预览] 矫正结果已预览，Enter 保存，R 重画")
+        self._update_status_bar()
+
+    # ============================== 撤销 / 重做 / 微调 ==============================
+
+    def _push_undo(self):
+        self.undo_stack.append(list(self.points))
+        if len(self.undo_stack) > 50:
+            self.undo_stack.pop(0)
+        self.redo_stack.clear()
+
+    def undo(self):
+        if not self.undo_stack:
+            print("  [提示] 没有可撤销的操作")
+            return
+        self.redo_stack.append(list(self.points))
+        self.points = self.undo_stack.pop()
+        self.selected_point = -1
+        self._refresh_after_points_change()
+        print("  [重置] 已撤销")
+
+    def redo(self):
+        if not self.redo_stack:
+            print("  [提示] 没有可重做的操作")
+            return
+        self.undo_stack.append(list(self.points))
+        self.points = self.redo_stack.pop()
+        self.selected_point = -1
+        self._refresh_after_points_change()
+        print("  [重置] 已重做")
+
+    def _refresh_after_points_change(self):
+        self.preview_result = None
+        if self.mode == 'level' and len(self.points) == 2:
+            self._show_level_preview()
+        else:
+            self._redisplay_current()
+        self._update_status_bar()
+
+    def _nudge_selected(self, key, state):
+        if self.selected_point < 0 or self.selected_point >= len(self.points):
+            return
+        step = 10 if (state & 0x1) else 1   # Shift = 10px
+        dx = {'left': -step, 'right': step}.get(key, 0)
+        dy = {'up': -step, 'down': step}.get(key, 0)
+        if dx == 0 and dy == 0:
+            return
+        self._push_undo()
+        x, y = self.points[self.selected_point]
+        self.points[self.selected_point] = (x + dx, y + dy)
+        if self.mode == 'level' and len(self.points) == 2:
+            self.preview_result = None
+            self._show_level_preview()
+        else:
+            self._draw_overlay()
         self._update_status_bar()
 
     # ============================== 操作 ==============================
@@ -660,6 +964,9 @@ class App:
         self.mode = mode
         self.points = []
         self.preview_result = None
+        self.selected_point = -1
+        self.undo_stack.clear()
+        self.redo_stack.clear()
 
         if mode == 'crop':
             self.btn_crop.configure(style='Accent.TButton')
@@ -678,8 +985,11 @@ class App:
         if self.viewing_result:
             self._exit_result_preview(silent=True)
             return
+        if self.points:
+            self._push_undo()
         self.points = []
         self.preview_result = None
+        self.selected_point = -1
         if self.original_img is not None:
             self._display_cv2_image(self.original_img)
         print("  [重置] 已清除标记点")
@@ -691,35 +1001,40 @@ class App:
             if len(self.points) != 4:
                 print("  [提示] 请先点击4个角点")
                 return None
-            pts = [self._canvas_to_image_point(p) for p in self.points]
-            return crop_tool.apply_crop(self.original_img, pts)
+            return crop_tool.apply_crop(self.original_img, self.points)
         elif self.mode == 'level':
             if self.preview_result is not None:
                 return self.preview_result
             if len(self.points) == 2:
-                pa = self._canvas_to_image_point(self.points[0])
-                pb = self._canvas_to_image_point(self.points[1])
-                return level.apply_level(self.original_img, pa, pb)
+                return level.apply_level(self.original_img, self.points[0], self.points[1])
             print("  [提示] 请先点击2个点")
             return None
         return None
 
-    def _save_result(self, result):
-        """保存结果到输出目录并更新缩略图/状态。返回保存路径。"""
-        img_info = self.image_list[self.current_idx]
+    def _save_file_only(self, idx, result):
+        """仅将结果写入磁盘，返回保存路径字符串（线程安全，不触碰 UI）。"""
+        img_info = self.image_list[idx]
         stem = Path(img_info['path']).stem
         sub = img_info['subfolder']
         out_dir = Path(self.output_dir) / sub
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{stem}.png"
         save_image_cv2(result, out_path)
+        return str(out_path)
 
-        self.processed_set.add(self.current_idx)
-        self.result_paths[self.current_idx] = str(out_path)
-        self._mark_thumb_processed(self.current_idx)
-        self._upsert_result_thumbnail(self.current_idx, str(out_path))
+    def _register_saved(self, idx, out_path):
+        """登记已保存结果并更新缩略图/状态（须在主线程调用）。"""
+        self.processed_set.add(idx)
+        self.result_paths[idx] = out_path
+        self._mark_thumb_processed(idx)
+        self._upsert_result_thumbnail(idx, out_path)
         self._update_thumb_status()
-        return out_path
+
+    def _save_result(self, result):
+        """保存当前图片结果并更新 UI。返回保存路径 Path。"""
+        out_path = self._save_file_only(self.current_idx, result)
+        self._register_saved(self.current_idx, out_path)
+        return Path(out_path)
 
     def save_current(self):
         if self.viewing_result:
@@ -738,9 +1053,16 @@ class App:
         out_path = self._save_result(result)
         print(f"  [保存] 已保存: {out_path.name}")
 
+        # 记忆本次标记点，供下一张粘贴复用
+        if self.points:
+            self.last_points = (self.mode, list(self.points))
+
         # 清除当前标记，避免在最后一张重复按 Enter 造成重复保存
         self.points = []
         self.preview_result = None
+        self.selected_point = -1
+        self.undo_stack.clear()
+        self.redo_stack.clear()
         self.next_image()
 
     def skip_current(self):
@@ -755,7 +1077,99 @@ class App:
 
         self.points = []
         self.preview_result = None
+        self.selected_point = -1
+        self.undo_stack.clear()
+        self.redo_stack.clear()
         self.next_image()
+
+    def apply_to_folder(self):
+        """用当前标记点批量处理本子文件夹中从当前图起的所有图片（同机位场景）。"""
+        if self.viewing_result:
+            self._exit_result_preview(silent=True)
+        if self.current_idx < 0 or self.original_img is None:
+            print("  [提示] 请先选择图片")
+            return
+        if self.mode is None:
+            print("  [提示] 请先选择模式 (1=裁剪 2=矫正)")
+            return
+        need = 4 if self.mode == 'crop' else 2
+        if len(self.points) != need:
+            print(f"  [提示] 请先标记 {need} 个点再套用")
+            return
+        if self.running:
+            return
+
+        cur_sub = self.image_list[self.current_idx]['subfolder']
+        targets = [i for i in range(self.current_idx, len(self.image_list))
+                   if self.image_list[i]['subfolder'] == cur_sub]
+        if not targets:
+            return
+
+        already = sum(1 for i in targets if i in self.processed_set)
+        msg = f"将用当前标记点处理文件夹 [{cur_sub}] 中的 {len(targets)} 张图片"
+        if already:
+            msg += f"\n其中 {already} 张已处理，将被覆盖"
+        msg += "\n\n适用于同一机位连拍的照片，确定继续吗？"
+        if not messagebox.askyesno("批量套用", msg):
+            return
+
+        mode = self.mode
+        pts = list(self.points)
+
+        def worker():
+            self.running = True
+            self.root.after(0, self._disable_buttons)
+            ok, fail = 0, 0
+            try:
+                print(f"  [模式] 批量套用{'裁剪' if mode == 'crop' else '矫正'}到 [{cur_sub}] 共 {len(targets)} 张")
+                for n, idx in enumerate(targets, 1):
+                    info = self.image_list[idx]
+                    try:
+                        img = pil_to_cv2(read_image_pil(info['path']))
+                        if mode == 'crop':
+                            result = crop_tool.apply_crop(img, pts)
+                        else:
+                            result = level.apply_level(img, pts[0], pts[1])
+                        out_path = self._save_file_only(idx, result)
+                        self.root.after(0, self._register_saved, idx, out_path)
+                        print(f"    {n}/{len(targets)}  [保存] {info['name']}")
+                        ok += 1
+                    except Exception as e:
+                        print(f"    {n}/{len(targets)}  [失败] {info['name']} - {e}")
+                        fail += 1
+                print(f"  [完成] 批量套用完毕：成功 {ok} 张，失败 {fail} 张")
+            finally:
+                self.running = False
+                self.root.after(0, self._enable_buttons)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def paste_last_points(self):
+        """粘贴上一张保存时使用的标记点作为起点（同机位场景）。"""
+        if self.viewing_result:
+            self._exit_result_preview(silent=True)
+        if self.original_img is None:
+            print("  [提示] 请先选择图片")
+            return
+        if not self.last_points:
+            print("  [提示] 还没有可复用的标记点")
+            return
+        mode, pts = self.last_points
+        if self.mode is None:
+            self.set_mode(mode)
+        elif self.mode != mode:
+            print("  [提示] 当前模式与上次不一致，无法粘贴")
+            return
+        self._push_undo()
+        self.points = list(pts)
+        self.preview_result = None
+        self.selected_point = -1
+        print("  [模式] 已粘贴上次标记点，可拖拽微调")
+        if self.mode == 'level' and len(self.points) == 2:
+            self._show_level_preview()
+        else:
+            self._redisplay_current()
+        self._update_status_bar()
 
     def skip_folder(self):
         if self.viewing_result:

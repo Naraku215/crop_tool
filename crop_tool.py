@@ -33,16 +33,27 @@ def apply_crop(img, points, target_size=None):
     参数:
         img: cv2 BGR numpy array
         points: 4个点 [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] 或 np.array (4,2)
-        target_size: 输出尺寸 (w, h)，默认 config.TARGET_SIZE
+        target_size: 输出尺寸 (w, h)。默认为 None，此时按所选四边形的真实
+                     边长自动计算输出宽高，保留原始比例、不拉伸；显式传入
+                     时仍输出固定尺寸（向后兼容）。
 
     返回:
-        cv2 BGR numpy array (target_size)
+        cv2 BGR numpy array
     """
-    if target_size is None:
-        target_size = config.TARGET_SIZE
-
     pts = np.array(points, dtype="float32")
     rect = order_points(pts)
+    (tl, tr, br, bl) = rect
+
+    if target_size is None:
+        # 按四边形真实边长计算输出尺寸，保留所选区域比例
+        width_bottom = np.linalg.norm(br - bl)
+        width_top = np.linalg.norm(tr - tl)
+        height_right = np.linalg.norm(tr - br)
+        height_left = np.linalg.norm(tl - bl)
+        max_width = max(int(round(width_bottom)), int(round(width_top)), 1)
+        max_height = max(int(round(height_right)), int(round(height_left)), 1)
+        target_size = (max_width, max_height)
+
     dst = np.array([
         [0, 0],
         [target_size[0] - 1, 0],

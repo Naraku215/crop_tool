@@ -25,15 +25,13 @@ def export_ppt(input_dir, output_dir, ratio=None):
     """
     导出为 PPT（每个子文件夹生成一个 .pptx 文件）
 
+    每张图按其自身宽高比在 16:9 幻灯片内居中等比放置（不拉伸、不裁切）。
+
     参数:
         input_dir: 输入目录
         output_dir: 输出目录
-        ratio: 视觉比例矫正（默认 config.TARGET_VISUAL_RATIO）
-               16/9 = 铺满整页，4/3 = 居中留白矫正
+        ratio: 已废弃（保留以不破坏 CLI 签名），不再用于强制比例矫正。
     """
-    if ratio is None:
-        ratio = config.TARGET_VISUAL_RATIO
-
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -46,7 +44,7 @@ def export_ppt(input_dir, output_dir, ratio=None):
 
     slide_w = config.SLIDE_WIDTH_INCH
     slide_h = config.SLIDE_HEIGHT_INCH
-    slide_ratio = 16 / 9
+    slide_ratio = slide_w / slide_h
 
     for speaker_name, images in speaker_dirs:
         print(f"  [{speaker_name}] {len(images)} 张图片")
@@ -61,25 +59,27 @@ def export_ppt(input_dir, output_dir, ratio=None):
                 blank_layout = prs.slide_layouts[6]
                 slide = prs.slides.add_slide(blank_layout)
 
-                if abs(ratio - 16/9) < 0.01:
-                    slide.shapes.add_picture(str(img_path), 0, 0,
-                                             width=Inches(slide_w),
-                                             height=Inches(slide_h))
-                else:
-                    if ratio > slide_ratio:
-                        display_width = Inches(slide_w)
-                        display_height = Inches(slide_w / ratio)
-                        left = 0
-                        top = Inches((slide_h - slide_w / ratio) / 2)
-                    else:
-                        display_height = Inches(slide_h)
-                        display_width = Inches(slide_h * ratio)
-                        top = 0
-                        left = Inches((slide_w - slide_h * ratio) / 2)
+                # 按图片自身宽高比在幻灯片内居中等比放置
+                with Image.open(str(img_path)) as im:
+                    iw, ih = im.size
+                img_ratio = iw / ih if ih else slide_ratio
 
-                    slide.shapes.add_picture(str(img_path), int(left), int(top),
-                                             width=int(display_width),
-                                             height=int(display_height))
+                if img_ratio > slide_ratio:
+                    # 图片更宽：宽铺满，上下留白
+                    display_width = Inches(slide_w)
+                    display_height = Inches(slide_w / img_ratio)
+                    left = 0
+                    top = Inches((slide_h - slide_w / img_ratio) / 2)
+                else:
+                    # 图片更高：高铺满，左右留白
+                    display_height = Inches(slide_h)
+                    display_width = Inches(slide_h * img_ratio)
+                    top = 0
+                    left = Inches((slide_w - slide_h * img_ratio) / 2)
+
+                slide.shapes.add_picture(str(img_path), int(left), int(top),
+                                         width=int(display_width),
+                                         height=int(display_height))
             except Exception as e:
                 print(f"    [失败] {e}")
 
