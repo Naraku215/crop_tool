@@ -55,7 +55,7 @@ echo.
 
 REM 压缩为 zip
 echo [4/4] 压缩为 zip...
-powershell -Command "Compress-Archive -Path 'dist\crop_tool\*' -DestinationPath 'dist\crop_tool-v2.4.zip' -Force"
+powershell -Command "Compress-Archive -Path 'dist\crop_tool\*' -DestinationPath 'dist\crop_tool-v2.6.zip' -Force"
 echo   完成
 echo.
 
@@ -63,7 +63,7 @@ echo ========================================
 echo   打包成功！
 echo ========================================
 echo   输出目录: dist\crop_tool\
-echo   压缩包:   dist\crop_tool-v2.4.zip
+echo   压缩包:   dist\crop_tool-v2.6.zip
 echo.
 echo   请将 zip 文件上传到 GitHub Releases
 echo ========================================
