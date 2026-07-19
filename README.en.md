@@ -1,5 +1,7 @@
 # crop_tool
 
+[简体中文 README](README.md) | English
+
 **A batch cropping and perspective-correction tool designed for one specific pain point: a large folder of photos where every image needs a different crop region.**
 
 You have hundreds of recaptured photos — certificates, award plaques, ID cards, whiteboards, projector slides, invoices, exam papers — each taken at a different angle and position, and you need to extract and straighten a specific region from every single one. Generic tools either cannot do this at all, or they make the process painfully slow. crop_tool is built for exactly this workflow: **per-image precise framing, human-in-the-loop guidance, machine-assisted precision, and a keyboard-driven workflow that stays smooth even for hundreds of images.**
