@@ -18,6 +18,7 @@ import config
 import crop_tool
 import level
 import export
+from i18n import I18n, load_settings, save_settings
 from utils import scan_images, read_image_pil, pil_to_cv2, cv2_to_pil, save_image_cv2
 
 VERSION = "v2.6"
@@ -63,17 +64,21 @@ FONT_LOG    = ('Consolas', 11)
 
 class ColoredLogRedirector:
     """stdout -> Text widget, 彩色高亮"""
-    COLOR_MAP = [
-        ('error',   ('[错误]', '[失败]'),          RED),
-        ('success', ('[完成]', '[成功]', '[保存]'), GREEN),
-        ('warn',    ('[提示]', '[警告]', '[已处理]'), YELLOW),
-        ('info',    ('[模式]', '[预览]', '[检测]', '[加载]', '[导出]', '[输出]'), CYAN),
-        ('skip',    ('[跳过]', '[重置]', '[退回]'), ORANGE),
-    ]
 
-    def __init__(self, text_widget):
+    def __init__(self, text_widget, translate=None):
         self.tw = text_widget
         self._buf = ''
+        self._translate = translate or (lambda k: k)
+
+    def color_map(self):
+        return [
+            ('error',   (self._translate('log_error'), self._translate('log_fail')), RED),
+            ('success', (self._translate('log_done'), self._translate('log_success'), self._translate('log_save')), GREEN),
+            ('warn',    (self._translate('log_tip'), self._translate('log_warn'), self._translate('log_processed')), YELLOW),
+            ('info',    (self._translate('log_mode'), self._translate('log_preview'), self._translate('log_detect'),
+                         self._translate('log_load'), self._translate('log_export'), self._translate('log_output')), CYAN),
+            ('skip',    (self._translate('log_skip'), self._translate('log_reset'), self._translate('log_back')), ORANGE),
+        ]
 
     def write(self, text):
         if not text:
@@ -91,7 +96,7 @@ class ColoredLogRedirector:
 
     def _insert_line(self, line):
         tag = 'default'
-        for tn, prefixes, _ in self.COLOR_MAP:
+        for tn, prefixes, _ in self.color_map():
             if any(p in line for p in prefixes):
                 tag = tn
                 break
@@ -185,23 +190,29 @@ class App:
         self.viewing_result = False
         self.session_outputs = set()  # 本次会话写入磁盘的成品路径（用于退出时可选删除）
 
+        # 国际化
+        settings = load_settings()
+        self.i18n = I18n(lang=settings.get('language', 'zh'))
+        self._t = self.i18n.t
+        self._translatable = []  # (widget_or_callable, key, kwargs)
+
         # 交互开关（可在动作条即时切换）
         self.auto_carry = tk.BooleanVar(value=False)  # 自动沿用上一张标记点（默认关）
         self.magnet = tk.BooleanVar(value=True)        # 裁剪角点磁性吸附（默认开）
 
         self._setup_style()
         self._build_ui()
-        sys.stdout = ColoredLogRedirector(self.log_text)
+        sys.stdout = ColoredLogRedirector(self.log_text, translate=self._t)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.bind('<KeyPress>', self._on_keypress)
         self.root.bind('<KeyRelease-space>', self._on_space_release)
 
         self._show_canvas_hint()
         self._update_status_bar()
-        print("crop_tool " + VERSION)
+        print(self._t('app_title', version=VERSION))
         print("=" * 50)
-        print("快捷键: Enter=保存 S=跳过 B=上一张 N=跳过文件夹 R=重画 A=批量套用 P=粘贴点 D=自动框选")
-        print("        1=裁剪 2=矫正 Ctrl+Z/Y=撤销/重做 方向键=微调 滚轮/+/-/0=缩放 空格拖拽=平移")
+        print(self._t('shortcut_intro'))
+        print(self._t('shortcut_intro2'))
 
     # ============================== 样式 ==============================
 
@@ -253,6 +264,50 @@ class App:
                         borderwidth=0, arrowcolor=TEXT_DIM, width=10)
         style.map('Vertical.TScrollbar', background=[('active', ACCENT_DIM)])
 
+    # ============================== i18n helpers ==============================
+
+    def _tr_widget(self, widget, key, **kwargs):
+        """翻译并注册控件，支持语言切换后自动刷新。"""
+        self._translatable.append((widget, key, kwargs))
+        widget.configure(text=self._t(key, **kwargs))
+        return widget
+
+    def _tr_label(self, widget, key, **kwargs):
+        """同上，针对 tk.Label/ttk.Label。"""
+        self._translatable.append((widget, key, kwargs))
+        widget.configure(text=self._t(key, **kwargs))
+        return widget
+
+    def _tr_variable(self, callable_ref, key, **kwargs):
+        """注册一个回调，切换语言时调用以更新动态文本。"""
+        self._translatable.append((callable_ref, key, kwargs))
+        return callable_ref
+
+    def _switch_language(self):
+        new_lang = 'en' if self.i18n.lang == 'zh' else 'zh'
+        self.i18n.lang = new_lang
+        self._t = self.i18n.t
+        save_settings({'language': new_lang})
+        self._refresh_language()
+
+    def _refresh_language(self):
+        """刷新所有已注册翻译控件的文本。"""
+        for item in self._translatable:
+            target, key, kwargs = item
+            text = self._t(key, **kwargs)
+            if callable(target):
+                target(text)
+            else:
+                try:
+                    target.configure(text=text)
+                except Exception:
+                    pass
+        # 动态刷新状态栏、帮助等
+        self._update_status_bar()
+        self._show_canvas_hint()
+        # 刷新窗口标题
+        self.root.title(f"crop_tool {VERSION}")
+
     # ============================== 布局 ==============================
 
     def _build_ui(self):
@@ -265,16 +320,23 @@ class App:
         ttk.Label(top, text="crop_tool", style='Title.TLabel').pack(side='left')
         ttk.Label(top, text=f" {VERSION}", style='Dim.TLabel').pack(side='left', padx=(2, 0))
 
-        self.btn_select = ttk.Button(top, text="  选择图片文件夹  ", style='Accent.TButton',
+        self.btn_select = ttk.Button(top, text="", style='Accent.TButton',
                                      command=self.select_folder)
+        self._tr_widget(self.btn_select, 'select_image_folder')
         self.btn_select.pack(side='left', padx=(20, 0))
 
-        self.folder_label = ttk.Label(top, text="未选择文件夹", style='Dim.TLabel')
+        self.folder_label = ttk.Label(top, text=self._t('no_folder_selected'), style='Dim.TLabel')
         self.folder_label.pack(side='left', padx=(12, 0))
 
-        self.btn_help = ttk.Button(top, text="  ❓ 使用帮助  ", style='Help.TButton',
+        self.btn_help = ttk.Button(top, text="", style='Help.TButton',
                                    command=self._show_help)
-        self.btn_help.pack(side='right')
+        self._tr_widget(self.btn_help, 'help')
+        self.btn_help.pack(side='right', padx=(0, 6))
+
+        # 语言切换按钮
+        self.btn_lang = ttk.Button(top, text="", command=self._switch_language)
+        self._tr_widget(self.btn_lang, 'language_switch')
+        self.btn_lang.pack(side='right')
 
         # === 三栏 ===
         main = ttk.PanedWindow(self.root, orient='horizontal')
@@ -283,7 +345,9 @@ class App:
         # 左：原图
         left = ttk.Frame(main)
         main.add(left, weight=0)
-        ttk.Label(left, text="原图列表", style='Hdr.TLabel').pack(anchor='w', pady=(0, 5))
+        lbl_original = ttk.Label(left, text="", style='Hdr.TLabel')
+        self._tr_widget(lbl_original, 'original_list')
+        lbl_original.pack(anchor='w', pady=(0, 5))
         lc = ttk.Frame(left)
         lc.pack(fill='both', expand=True)
         self.thumb_canvas = tk.Canvas(lc, width=200, bg=BG_PANEL, highlightthickness=0, bd=0)
@@ -306,9 +370,11 @@ class App:
 
         mbar = ttk.Frame(center)
         mbar.pack(fill='x', pady=(0, 6))
-        self.btn_crop = ttk.Button(mbar, text="  裁剪 [1]  ", command=lambda: self.set_mode('crop'))
+        self.btn_crop = ttk.Button(mbar, text="", command=lambda: self.set_mode('crop'))
+        self._tr_widget(self.btn_crop, 'btn_crop')
         self.btn_crop.pack(side='left', padx=(0, 5))
-        self.btn_level = ttk.Button(mbar, text="  矫正 [2]  ", command=lambda: self.set_mode('level'))
+        self.btn_level = ttk.Button(mbar, text="", command=lambda: self.set_mode('level'))
+        self._tr_widget(self.btn_level, 'btn_level')
         self.btn_level.pack(side='left')
 
         # 醒目状态横幅
@@ -337,39 +403,48 @@ class App:
 
         abar = ttk.Frame(center)
         abar.pack(fill='x', pady=(6, 0))
-        self.btn_clear = ttk.Button(abar, text=" 重画 [R] ", command=self.clear_points)
+        self.btn_clear = ttk.Button(abar, text="", command=self.clear_points)
+        self._tr_widget(self.btn_clear, 'btn_clear')
         self.btn_clear.pack(side='left', padx=(0, 5))
-        self.btn_save  = ttk.Button(abar, text=" 保存 [Enter] ", style='Accent.TButton', command=self.save_current)
+        self.btn_save  = ttk.Button(abar, text="", style='Accent.TButton', command=self.save_current)
+        self._tr_widget(self.btn_save, 'btn_save')
         self.btn_save.pack(side='left', padx=(0, 5))
-        self.btn_skip  = ttk.Button(abar, text=" 跳过 [S] ", command=self.skip_current)
+        self.btn_skip  = ttk.Button(abar, text="", command=self.skip_current)
+        self._tr_widget(self.btn_skip, 'btn_skip')
         self.btn_skip.pack(side='left', padx=(0, 5))
-        self.btn_prev  = ttk.Button(abar, text=" 上一张 [B] ", command=self.prev_image)
+        self.btn_prev  = ttk.Button(abar, text="", command=self.prev_image)
+        self._tr_widget(self.btn_prev, 'btn_prev')
         self.btn_prev.pack(side='left', padx=(0, 5))
-        self.btn_next  = ttk.Button(abar, text=" 下一张 [N] ", command=self.next_image)
+        self.btn_next  = ttk.Button(abar, text="", command=self.next_image)
+        self._tr_widget(self.btn_next, 'btn_next')
         self.btn_next.pack(side='left', padx=(0, 5))
-        self.btn_apply = ttk.Button(abar, text=" 批量套用 [A] ", command=self.apply_to_folder)
+        self.btn_apply = ttk.Button(abar, text="", command=self.apply_to_folder)
+        self._tr_widget(self.btn_apply, 'btn_apply')
         self.btn_apply.pack(side='left')
-        self.btn_suggest = ttk.Button(abar, text=" 自动框选 [D] ", command=self.suggest_quad)
+        self.btn_suggest = ttk.Button(abar, text="", command=self.suggest_quad)
+        self._tr_widget(self.btn_suggest, 'btn_suggest')
         self.btn_suggest.pack(side='left', padx=(5, 0))
 
-        Tooltip(self.btn_clear, "清除当前标记点，重新点选")
-        Tooltip(self.btn_save, "处理并保存当前图，自动跳到下一张未处理")
-        Tooltip(self.btn_skip, "不处理当前图，跳到下一张未处理")
-        Tooltip(self.btn_prev, "回到上一张")
-        Tooltip(self.btn_next, "前往下一张")
-        Tooltip(self.btn_apply, "把当前选区套用到本文件夹其余同机位图片")
-        Tooltip(self.btn_suggest, "自动识别边框并摆好四角作为起点，再拖拽微调（仅当前图）")
+        Tooltip(self.btn_clear, self._t('tip_clear'))
+        Tooltip(self.btn_save, self._t('tip_save'))
+        Tooltip(self.btn_skip, self._t('tip_skip'))
+        Tooltip(self.btn_prev, self._t('tip_prev'))
+        Tooltip(self.btn_next, self._t('tip_next'))
+        Tooltip(self.btn_apply, self._t('tip_apply'))
+        Tooltip(self.btn_suggest, self._t('tip_suggest'))
 
         # 辅助开关独立一行，左对齐，任意宽度均完整可见
         tbar = ttk.Frame(center)
         tbar.pack(fill='x', pady=(6, 0))
-        ttk.Label(tbar, text="辅助功能：", style='Dim.TLabel').pack(side='left', padx=(0, 8))
-        self.btn_magnet = self._make_toggle(tbar, "自动吸边", self.magnet)
+        lbl_helper = ttk.Label(tbar, text="", style='Dim.TLabel')
+        self._tr_widget(lbl_helper, 'helper_toggles')
+        lbl_helper.pack(side='left', padx=(0, 8))
+        self.btn_magnet = self._make_toggle(tbar, 'snap_to_edge', self.magnet)
         self.btn_magnet.pack(side='left', padx=(0, 8))
-        self.btn_carry = self._make_toggle(tbar, "沿用上张选区", self.auto_carry)
+        self.btn_carry = self._make_toggle(tbar, 'carry_over_last', self.auto_carry)
         self.btn_carry.pack(side='left', padx=(0, 8))
-        Tooltip(self.btn_magnet, "落点自动吸附到附近真实边角，点不准也贴准（仅裁剪）")
-        Tooltip(self.btn_carry, "开启后，切到下一张自动带入上一张选区作为起点")
+        Tooltip(self.btn_magnet, self._t('tip_magnet'))
+        Tooltip(self.btn_carry, self._t('tip_carry'))
 
         # 右：已处理
         right = ttk.Frame(main)
@@ -388,7 +463,7 @@ class App:
             lambda e: self.result_canvas.configure(scrollregion=self.result_canvas.bbox('all')))
         self.result_canvas.bind('<MouseWheel>',
             lambda e: self.result_canvas.yview_scroll(int(-e.delta / 120), 'units'))
-        self.result_status = ttk.Label(right, text="共 0 张", style='Dim.TLabel', font=FONT_SMALL)
+        self.result_status = ttk.Label(right, text=self._t('processed_result_count', count=0), style='Dim.TLabel', font=FONT_SMALL)
         self.result_status.pack(anchor='w', pady=(4, 0))
 
         # === 底部：输出信息 + 导出 + 日志 ===
@@ -397,10 +472,13 @@ class App:
 
         outrow = ttk.Frame(bottom)
         outrow.pack(fill='x', pady=(2, 8))
-        ttk.Label(outrow, text="保存位置:", style='Dim.TLabel').pack(side='left')
-        self.output_label = ttk.Label(outrow, text="（选择文件夹后自动生成）", style='Dim.TLabel', foreground=TEXT_DIM)
+        lbl_save = ttk.Label(outrow, text="", style='Dim.TLabel')
+        self._tr_widget(lbl_save, 'save_location')
+        lbl_save.pack(side='left')
+        self.output_label = ttk.Label(outrow, text=self._t('auto_generated'), style='Dim.TLabel', foreground=TEXT_DIM)
         self.output_label.pack(side='left', padx=(6, 0))
-        self.btn_open = ttk.Button(outrow, text="打开保存文件夹", command=self.open_output_folder)
+        self.btn_open = ttk.Button(outrow, text="", command=self.open_output_folder)
+        self._tr_widget(self.btn_open, 'open_save_folder')
         self.btn_open.pack(side='left', padx=(12, 0))
 
         # 导出靠右对齐（左→右显示 PPT / PDF / Word）
@@ -410,12 +488,15 @@ class App:
         self.btn_pdf.pack(side='right', padx=(4, 0))
         self.btn_ppt  = ttk.Button(outrow, text=" PPT ",  style='Export.TButton', command=lambda: self.do_export('ppt'))
         self.btn_ppt.pack(side='right', padx=(4, 0))
-        ttk.Label(outrow, text="导出:", style='Dim.TLabel').pack(side='right', padx=(0, 6))
+        lbl_export = ttk.Label(outrow, text="", style='Dim.TLabel')
+        self._tr_widget(lbl_export, 'export')
+        lbl_export.pack(side='right', padx=(0, 6))
 
         # 分割边框
         tk.Frame(bottom, bg=BORDER, height=1, bd=0).pack(fill='x', pady=(0, 8))
 
-        logf = ttk.LabelFrame(bottom, text="日志", padding=(8, 5))
+        logf = ttk.LabelFrame(bottom, text="", padding=(8, 5))
+        self._tr_widget(logf, 'log')
         logf.pack(fill='x')
         self.log_text = tk.Text(logf, height=4, font=FONT_LOG, wrap='word',
                                 bg=BG_INPUT, fg=TEXT_MAIN,
@@ -441,32 +522,34 @@ class App:
 
     # ============================== 开关 ==============================
 
-    def _make_toggle(self, parent, label, var):
+    def _make_toggle(self, parent, label_key, var):
         """创建胶囊式开/关按钮，点击翻转 var 并刷新样式/文案。"""
         btn = ttk.Button(parent)
-        btn.configure(command=lambda: self._toggle_var(btn, label, var))
-        self._refresh_toggle(btn, label, var)
+        btn.configure(command=lambda: self._toggle_var(btn, label_key, var))
+        self._refresh_toggle(btn, label_key, var)
         return btn
 
-    def _toggle_var(self, btn, label, var):
+    def _toggle_var(self, btn, label_key, var):
         var.set(not var.get())
-        self._refresh_toggle(btn, label, var)
+        self._refresh_toggle(btn, label_key, var)
 
-    def _refresh_toggle(self, btn, label, var):
+    def _refresh_toggle(self, btn, label_key, var):
         on = var.get()
-        btn.configure(text=f" {label} · {'开' if on else '关'} ",
+        label = self._t(label_key)
+        state = self._t('toggle_on') if on else self._t('toggle_off')
+        btn.configure(text=f" {label} · {state} ",
                       style='ToggleOn.TButton' if on else 'ToggleOff.TButton')
 
     # ============================== 帮助 ==============================
 
     def _show_help(self):
         win = tk.Toplevel(self.root)
-        win.title("使用帮助")
+        win.title(self._t('help_title'))
         win.configure(bg=BG_MAIN)
         win.geometry("580x600")
         win.transient(self.root)
 
-        tk.Label(win, text="crop_tool 使用指南", font=FONT_TITLE, fg=ACCENT, bg=BG_MAIN
+        tk.Label(win, text=self._t('help_title'), font=FONT_TITLE, fg=ACCENT, bg=BG_MAIN
                  ).pack(anchor='w', padx=22, pady=(18, 10))
 
         txt = tk.Text(win, font=FONT_MAIN, wrap='word', bg=BG_INPUT, fg=TEXT_MAIN,
@@ -474,47 +557,47 @@ class App:
         txt.pack(fill='both', expand=True, padx=22, pady=(0, 12))
 
         sections = [
-            ('基本流程', [
-                '1. 点击顶部「选择图片文件夹」载入待处理图片',
-                '2. 点击左侧缩略图选择要处理的图片',
-                '3. 选择模式：裁剪 [1] 或 矫正 [2]',
-                '4. 在画布上按上方提示条的指引点击标记点',
-                '5. 按 Enter 保存，结果显示在右侧「已处理结果」',
+            (self._t('help_basic_flow'), [
+                self._t('help_basic_1'),
+                self._t('help_basic_2'),
+                self._t('help_basic_3'),
+                self._t('help_basic_4'),
+                self._t('help_basic_5'),
             ]),
-            ('裁剪模式 [1]', [
-                '依次点击 4 个角点：左上 → 右上 → 右下 → 左下',
-                '标记完成后按 Enter，透视矫正为标准尺寸并保存',
+            (self._t('help_crop_title'), [
+                self._t('help_crop_desc'),
+                self._t('help_crop_save'),
             ]),
-            ('矫正模式 [2]', [
-                '点击一条应为水平的线：先点左端，再点右端',
-                '程序自动计算倾斜角度并旋转矫正',
+            (self._t('help_level_title'), [
+                self._t('help_level_desc'),
+                self._t('help_level_auto'),
             ]),
-            ('精细编辑', [
-                '标记点可直接拖拽微调，选中后可用方向键像素级移动（Shift 为 10px）',
-                '滚轮缩放、空格或中键拖拽平移，配合放大镜精确点选',
-                '开启「自动吸边」后，裁剪角点会自动吸附到附近真实角，点不准也能贴准',
-                '按 D（或“自动框选”）自动摆好四角作起点，再拖拽微调（仅当前图）',
-                '开启「沿用上张选区」后，切到下一张会自动带入上张选区作起点',
-                '同机位连拍：标好一张后按 A 一键批量套用到本文件夹剩余图片',
-                '按 P 可粘贴上一张的标记点作为起点，Ctrl+Z/Y 撤销/重做',
+            (self._t('help_edit_title'), [
+                self._t('help_edit_desc'),
+                self._t('help_edit_zoom'),
+                self._t('help_edit_magnet'),
+                self._t('help_edit_autoquad'),
+                self._t('help_edit_carry'),
+                self._t('help_edit_batch'),
+                self._t('help_edit_paste'),
             ]),
-            ('快捷键', [
-                'Enter = 保存当前        S = 跳过当前',
-                'B = 上一张              N = 跳过整个文件夹',
-                'R = 重画（清除标记点）   A = 批量套用到本文件夹剩余',
-                'P = 粘贴上次标记点       D = 自动框选（自动检测边框）',
-                '1 = 裁剪模式            2 = 矫正模式',
-                'Ctrl+Z = 撤销           Ctrl+Y = 重做',
-                '方向键 = 微调选中点（Shift 为 10px）',
-                '滚轮 = 缩放    + / - = 缩放    0 = 复位视图',
-                '空格+拖拽 或 中键拖拽 = 平移画布',
-                'Esc = 返回原图 / 清除标记点    Q = 退出程序',
+            (self._t('help_shortcuts'), [
+                self._t('help_shortcut_1'),
+                self._t('help_shortcut_2'),
+                self._t('help_shortcut_3'),
+                self._t('help_shortcut_4'),
+                self._t('help_shortcut_5'),
+                self._t('help_shortcut_6'),
+                self._t('help_shortcut_7'),
+                self._t('help_shortcut_8'),
+                self._t('help_shortcut_9'),
+                self._t('help_shortcut_10'),
             ]),
-            ('保存与导出', [
-                '每张处理后立即保存到「保存位置」显示的文件夹',
-                '文件已写入磁盘，关闭窗口不会丢失已处理的图片',
-                '点击「打开保存文件夹」可快速定位成品',
-                '全部处理完可在右下角导出为 PPT / PDF / Word',
+            (self._t('help_save_export'), [
+                self._t('help_save_desc'),
+                self._t('help_save_persistent'),
+                self._t('help_open_folder'),
+                self._t('help_export'),
             ]),
         ]
         for title, lines in sections:
@@ -526,8 +609,10 @@ class App:
         txt.tag_config('b', foreground=TEXT_MAIN)
         txt.config(state='disabled')
 
-        ttk.Button(win, text="  知道了  ", style='Accent.TButton',
-                   command=win.destroy).pack(pady=(0, 18))
+        btn_ok = ttk.Button(win, text="", style='Accent.TButton',
+                   command=win.destroy)
+        self._tr_widget(btn_ok, 'btn_ok')
+        btn_ok.pack(pady=(0, 18))
 
     # ============================== 状态横幅 ==============================
 
@@ -538,27 +623,27 @@ class App:
         cy = h // 2
 
         if self.viewing_result:
-            text = "预览结果中  —  点击画布 或 按 Esc 返回原图继续处理"
+            text = self._t('preview_result_hint')
             color = ORANGE
         elif self.current_idx < 0:
-            text = "请选择图片文件夹，然后点击左侧缩略图开始"
+            text = self._t('please_select_image')
             color = TEXT_DIM
         elif self.mode is None:
-            text = f"{self.current_idx+1}/{len(self.image_list)}  —  请先选择模式：按 1 裁剪 / 按 2 矫正"
+            text = f"{self.current_idx+1}/{len(self.image_list)}  —  {self._t('please_select_mode')}"
             color = YELLOW
         elif self.mode == 'crop':
             if len(self.points) == 4:
-                text = f"裁剪  {self.current_idx+1}/{len(self.image_list)}  —  4 个点已标记，可拖拽/方向键微调，Enter 保存 / A 套用整个文件夹 / R 重画"
+                text = f"{self._t('mode_crop')}  {self.current_idx+1}/{len(self.image_list)}  —  {self._t('crop_complete_hint')}"
             else:
-                text = f"裁剪  {self.current_idx+1}/{len(self.image_list)}  —  依次点击 4 个角点（左上→右上→右下→左下），还需 {4-len(self.points)} 个"
+                text = f"{self._t('mode_crop')}  {self.current_idx+1}/{len(self.image_list)}  —  {self._t('crop_need_more', remaining=4-len(self.points))}"
             color = ACCENT
         else:  # level
             if self.preview_result is not None:
-                text = f"矫正  {self.current_idx+1}/{len(self.image_list)}  —  已预览，可拖拽端点微调，Enter 保存 / A 套用整个文件夹 / R 重画"
+                text = f"{self._t('mode_level')}  {self.current_idx+1}/{len(self.image_list)}  —  {self._t('level_preview_hint')}"
             elif len(self.points) == 1:
-                text = f"矫正  {self.current_idx+1}/{len(self.image_list)}  —  再点击水平线的右端点"
+                text = f"{self._t('mode_level')}  {self.current_idx+1}/{len(self.image_list)}  —  {self._t('level_click_right')}"
             else:
-                text = f"矫正  {self.current_idx+1}/{len(self.image_list)}  —  点击一条应水平的线：先左端，再右端"
+                text = f"{self._t('mode_level')}  {self.current_idx+1}/{len(self.image_list)}  —  {self._t('level_click_line')}"
             color = ACCENT
 
         # 背景 + 左侧强调条
@@ -645,7 +730,7 @@ class App:
     # ============================== 文件夹与缩略图 ==============================
 
     def select_folder(self):
-        folder = filedialog.askdirectory(title="选择图片文件夹")
+        folder = filedialog.askdirectory(title=self._t('select_image_folder'))
         if not folder:
             return
 
@@ -674,13 +759,13 @@ class App:
         self.image_list = [img for img in all_images if OUTPUT_SUBDIR not in Path(img['path']).parts]
 
         if not self.image_list:
-            print("  [提示] 所选文件夹中没有图片文件")
+            print(f"  {self._t('log_tip')} " + self._t('no_images_in_folder'))
             self._show_canvas_hint()
             self._update_status_bar()
             return
 
-        print(f"  [加载] 共找到 {len(self.image_list)} 张图片")
-        print(f"  [输出] 处理后的图片将保存到: {self.output_dir}")
+        print(f"  {self._t('log_load')} " + self._t('found_images', count=len(self.image_list)))
+        print(f"  {self._t('log_output')} " + self._t('output_will_be', output_dir=self.output_dir))
         self._restore_progress()
         self._load_thumbnails()
 
@@ -692,8 +777,8 @@ class App:
                     pil_img.thumbnail(config.THUMBNAIL_SIZE)
                     self.root.after(0, lambda i=idx, p=pil_img: self._add_thumbnail(i, p))
                 except Exception as e:
-                    print(f"  [失败] 缩略图: {img_info['name']} - {e}")
-            self.root.after(0, lambda: print("  [完成] 缩略图加载完毕，按 1=裁剪 或 2=矫正 开始"))
+                    print(f"  {self._t('log_fail')} " + self._t('thumb_fail', e=e))
+            self.root.after(0, lambda: print(f"  {self._t('log_done')} " + self._t('thumb_done')))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -725,7 +810,7 @@ class App:
         self._update_thumb_status()
 
     def _update_thumb_status(self):
-        self.thumb_status.config(text=f"共 {len(self.image_list)} 张 | 已处理 {len(self.processed_set)} 张")
+        self.thumb_status.config(text=self._t('status_total', total=len(self.image_list), processed=len(self.processed_set)))
 
     def _restore_progress(self):
         """重开时扫描输出目录，恢复已处理状态与右侧结果。"""
@@ -739,7 +824,7 @@ class App:
                 self.result_paths[idx] = str(out_path)
                 to_restore.append((idx, str(out_path)))
         if to_restore:
-            print(f"  [加载] 恢复已处理进度: {len(to_restore)} 张")
+            print(f"  {self._t('log_load')} " + self._t('restored_progress', count=len(to_restore)))
             for idx, p in to_restore:
                 self.root.after(0, self._upsert_result_thumbnail, idx, p)
 
@@ -750,7 +835,7 @@ class App:
         self.image_canvas.create_text(
             self.image_canvas.winfo_width() // 2 or 400,
             self.image_canvas.winfo_height() // 2 or 300,
-            text="请选择图片文件夹并点击缩略图", fill=TEXT_DIM, font=FONT_MAIN)
+            text=self._t('select_image_first'), fill=TEXT_DIM, font=FONT_MAIN)
 
     def _show_image(self, idx):
         if idx < 0 or idx >= len(self.image_list):
@@ -776,14 +861,14 @@ class App:
             self.original_img = pil_to_cv2(pil_img)
             self._display_cv2_image(self.original_img)
         except Exception as e:
-            print(f"  [错误] 加载失败: {e}")
+            print(f"  {self._t('log_error')} " + self._t('load_failed', e=e))
             return
 
         for i, w in self.thumb_widgets.items():
             w.config(highlightbackground=(ACCENT if i == idx else BORDER))
 
         if idx in self.processed_set:
-            print("  [已处理] 此图已处理过，可重新操作覆盖")
+            print(f"  {self._t('log_processed')} " + self._t('already_processed'))
 
         # 自动沿用上一张标记点作为起点（同机位/相似构图）
         if (self.auto_carry.get() and self.last_points
@@ -795,7 +880,7 @@ class App:
                     self._show_level_preview()
                 else:
                     self._draw_overlay()
-                print("  [模式] 已自动沿用上张标记点，可拖拽微调")
+                print(f"  {self._t('log_mode')} " + self._t('auto_carry_applied'))
 
         if idx in self.thumb_widgets:
             self.thumb_canvas.update_idletasks()
@@ -856,7 +941,7 @@ class App:
             return
 
         if self.mode is None:
-            print("  [提示] 请先选择模式 (1=裁剪 2=矫正)")
+            print(f"  {self._t('log_tip')} " + self._t('select_mode_first'))
             return
         if self.preview_result is not None:
             return
@@ -874,7 +959,7 @@ class App:
 
         if self.mode == 'crop' and len(self.points) == 4:
             self._hide_loupe()
-            print("  [提示] 4个点已标记，可拖拽微调，按 Enter 保存，R 重画")
+            print(f"  {self._t('log_tip')} " + self._t('four_points_ready'))
         elif self.mode == 'level' and len(self.points) == 2:
             self._hide_loupe()
             self._show_level_preview()
@@ -1049,10 +1134,10 @@ class App:
     def _show_level_preview(self):
         pa = self.points[0]
         pb = self.points[1]
-        print(f"  [检测] 倾斜角度: {level.get_angle(pa, pb):.2f} 度")
+        print(f"  {self._t('log_detect')} " + self._t('angle_detected', angle=level.get_angle(pa, pb)))
         self.preview_result = level.apply_level(self.original_img, pa, pb)
         self._display_cv2_image(self.preview_result)
-        print("  [预览] 矫正结果已预览，Enter 保存，R 重画")
+        print(f"  {self._t('log_preview')} " + self._t('level_preview_ready'))
         self._update_status_bar()
 
     # ============================== 撤销 / 重做 / 微调 ==============================
@@ -1065,23 +1150,23 @@ class App:
 
     def undo(self):
         if not self.undo_stack:
-            print("  [提示] 没有可撤销的操作")
+            print(f"  {self._t('log_tip')} " + self._t('no_undo'))
             return
         self.redo_stack.append(list(self.points))
         self.points = self.undo_stack.pop()
         self.selected_point = -1
         self._refresh_after_points_change()
-        print("  [重置] 已撤销")
+        print(f"  {self._t('log_reset')} " + self._t('undone'))
 
     def redo(self):
         if not self.redo_stack:
-            print("  [提示] 没有可重做的操作")
+            print(f"  {self._t('log_tip')} " + self._t('no_redo'))
             return
         self.undo_stack.append(list(self.points))
         self.points = self.redo_stack.pop()
         self.selected_point = -1
         self._refresh_after_points_change()
-        print("  [重置] 已重做")
+        print(f"  {self._t('log_reset')} " + self._t('redone'))
 
     def _refresh_after_points_change(self):
         self.preview_result = None
@@ -1124,11 +1209,11 @@ class App:
         if mode == 'crop':
             self.btn_crop.configure(style='Accent.TButton')
             self.btn_level.configure(style='TButton')
-            print("  [模式] 裁剪 - 点击4个角点(左上→右上→右下→左下)，Enter 保存")
+            print(f"  {self._t('log_mode')} " + self._t('crop_mode_status'))
         else:
             self.btn_level.configure(style='Accent.TButton')
             self.btn_crop.configure(style='TButton')
-            print("  [模式] 矫正 - 点击2个点(水平线左端→右端)，自动预览")
+            print(f"  {self._t('log_mode')} " + self._t('level_mode_status'))
 
         if self.original_img is not None:
             self._display_cv2_image(self.original_img)
@@ -1139,20 +1224,20 @@ class App:
         if self.viewing_result:
             self._exit_result_preview(silent=True)
         if self.original_img is None:
-            print("  [提示] 请先选择图片")
+            print(f"  {self._t('log_tip')} " + self._t('select_image_first_short'))
             return
         if self.mode != 'crop':
             self.set_mode('crop')
         quad = crop_tool.detect_quad(self.original_img)
         if quad is None:
-            print("  [提示] 未检测到明显四边形，请手动点选")
+            print(f"  {self._t('log_tip')} " + self._t('no_auto_quad'))
             return
         self._push_undo()
         self.points = list(quad)
         self.preview_result = None
         self.selected_point = -1
         self._redisplay_current()
-        print("  [模式] 已建议四角，可拖拽微调，Enter 保存")
+        print(f"  {self._t('log_mode')} " + self._t('auto_quad_done'))
         self._update_status_bar()
 
     def clear_points(self):
@@ -1166,14 +1251,14 @@ class App:
         self.selected_point = -1
         if self.original_img is not None:
             self._display_cv2_image(self.original_img)
-        print("  [重置] 已清除标记点")
+        print(f"  {self._t('log_reset')} " + self._t('cleared'))
         self._update_status_bar()
 
     def _compute_result(self):
         """根据当前模式与标记点计算处理结果，无有效标记返回 None"""
         if self.mode == 'crop':
             if len(self.points) != 4:
-                print("  [提示] 请先点击4个角点")
+                print(f"  {self._t('log_tip')} " + self._t('need_4_points'))
                 return None
             return crop_tool.apply_crop(self.original_img, self.points)
         elif self.mode == 'level':
@@ -1181,7 +1266,7 @@ class App:
                 return self.preview_result
             if len(self.points) == 2:
                 return level.apply_level(self.original_img, self.points[0], self.points[1])
-            print("  [提示] 请先点击2个点")
+            print(f"  {self._t('log_tip')} " + self._t('need_2_points'))
             return None
         return None
 
@@ -1215,10 +1300,10 @@ class App:
         if self.viewing_result:
             self._exit_result_preview(silent=True)
         if self.current_idx < 0:
-            print("  [提示] 请先选择图片")
+            print(f"  {self._t('log_tip')} " + self._t('select_image_first_short'))
             return
         if self.mode is None:
-            print("  [提示] 请先选择模式 (1=裁剪 2=矫正)")
+            print(f"  {self._t('log_tip')} " + self._t('select_mode_first'))
             return
 
         result = self._compute_result()
@@ -1226,7 +1311,7 @@ class App:
             return
 
         out_path = self._save_result(result)
-        print(f"  [保存] 已保存: {out_path.name}")
+        print(f"  {self._t('log_save')} " + self._t('saved', name=out_path.name))
 
         # 记忆本次标记点，供下一张粘贴复用
         if self.points:
@@ -1244,11 +1329,11 @@ class App:
         if self.viewing_result:
             self._exit_result_preview(silent=True)
         if self.current_idx < 0:
-            print("  [提示] 请先选择图片")
+            print(f"  {self._t('log_tip')} " + self._t('select_image_first_short'))
             return
 
         out_path = self._save_result(self.original_img)
-        print(f"  [跳过] 原样保存: {out_path.name}")
+        print(f"  {self._t('log_skip')} " + self._t('skipped_saved', name=out_path.name))
 
         self.points = []
         self.preview_result = None
@@ -1262,14 +1347,14 @@ class App:
         if self.viewing_result:
             self._exit_result_preview(silent=True)
         if self.current_idx < 0 or self.original_img is None:
-            print("  [提示] 请先选择图片")
+            print(f"  {self._t('log_tip')} " + self._t('select_image_first_short'))
             return
         if self.mode is None:
-            print("  [提示] 请先选择模式 (1=裁剪 2=矫正)")
+            print(f"  {self._t('log_tip')} " + self._t('select_mode_first'))
             return
         need = 4 if self.mode == 'crop' else 2
         if len(self.points) != need:
-            print(f"  [提示] 请先标记 {need} 个点再套用")
+            print(f"  {self._t('log_tip')} " + self._t('need_more_points', need=need))
             return
         if self.running:
             return
@@ -1281,11 +1366,11 @@ class App:
             return
 
         already = sum(1 for i in targets if i in self.processed_set)
-        msg = f"将用当前标记点处理文件夹 [{cur_sub}] 中的 {len(targets)} 张图片"
+        msg = self._t('batch_apply_confirm', folder=cur_sub, count=len(targets))
         if already:
-            msg += f"\n其中 {already} 张已处理，将被覆盖"
-        msg += "\n\n适用于同一机位连拍的照片，确定继续吗？"
-        if not messagebox.askyesno("批量套用", msg):
+            msg += self._t('batch_apply_overwrite', already=already)
+        msg += self._t('batch_apply_sure')
+        if not messagebox.askyesno(self._t('batch_apply_title'), msg):
             return
 
         mode = self.mode
@@ -1296,7 +1381,7 @@ class App:
             self.root.after(0, self._disable_buttons)
             ok, fail = 0, 0
             try:
-                print(f"  [模式] 批量套用{'裁剪' if mode == 'crop' else '矫正'}到 [{cur_sub}] 共 {len(targets)} 张")
+                print(f"  {self._t('log_mode')} " + self._t('batch_apply_title') + f"{'"Crop"' if mode == 'crop' else '"Level"'} to [{cur_sub}] {len(targets)} images")
                 for n, idx in enumerate(targets, 1):
                     info = self.image_list[idx]
                     try:
@@ -1312,7 +1397,7 @@ class App:
                     except Exception as e:
                         print(f"    {n}/{len(targets)}  [失败] {info['name']} - {e}")
                         fail += 1
-                print(f"  [完成] 批量套用完毕：成功 {ok} 张，失败 {fail} 张")
+                print(f"  {self._t('log_done')} " + self._t('batch_done', ok=ok, fail=fail))
             finally:
                 self.running = False
                 self.root.after(0, self._enable_buttons)
@@ -1324,22 +1409,22 @@ class App:
         if self.viewing_result:
             self._exit_result_preview(silent=True)
         if self.original_img is None:
-            print("  [提示] 请先选择图片")
+            print(f"  {self._t('log_tip')} " + self._t('select_image_first_short'))
             return
         if not self.last_points:
-            print("  [提示] 还没有可复用的标记点")
+            print(f"  {self._t('log_tip')} " + self._t('no_reusable_points'))
             return
         mode, pts = self.last_points
         if self.mode is None:
             self.set_mode(mode)
         elif self.mode != mode:
-            print("  [提示] 当前模式与上次不一致，无法粘贴")
+            print(f"  {self._t('log_tip')} " + self._t('mode_mismatch'))
             return
         self._push_undo()
         self.points = list(pts)
         self.preview_result = None
         self.selected_point = -1
-        print("  [模式] 已粘贴上次标记点，可拖拽微调")
+        print(f"  {self._t('log_mode')} " + self._t('pasted_points'))
         if self.mode == 'level' and len(self.points) == 2:
             self._show_level_preview()
         else:
@@ -1350,17 +1435,17 @@ class App:
         if self.viewing_result:
             self._exit_result_preview(silent=True)
         if self.current_idx < 0:
-            print("  [提示] 请先选择图片")
+            print(f"  {self._t('log_tip')} " + self._t('select_image_first_short'))
             return
         cur_sub = self.image_list[self.current_idx]['subfolder']
         idx = self.current_idx
         while idx < len(self.image_list) and self.image_list[idx]['subfolder'] == cur_sub:
             idx += 1
         if idx < len(self.image_list):
-            print(f"  [跳过] 文件夹 [{cur_sub}]")
+            print(f"  {self._t('log_skip')} " + self._t('skipped_folder', folder=cur_sub))
             self._show_image(idx)
         else:
-            print("  [完成] 已是最后一个文件夹")
+            print(f"  {self._t('log_done')} " + self._t('last_folder'))
 
     def _mark_thumb_processed(self, idx):
         if idx in self.thumb_widgets:
@@ -1401,9 +1486,9 @@ class App:
                 w.bind('<Leave>', lambda e, f=frame: f.config(highlightbackground=BORDER))
 
             self.result_data[idx] = {'frame': frame, 'ilbl': ilbl, 'path': img_path}
-            self.result_status.config(text=f"共 {len(self.result_data)} 张")
+            self.result_status.config(text=self._t('processed_result_count', count=len(self.result_data)))
         except Exception as e:
-            print(f"  [失败] 结果缩略图: {e}")
+            print(f"  {self._t('log_fail')} " + self._t('thumb_fail', e=e))
 
     def _preview_result(self, idx):
         """点击右侧结果 -> 主画布预览处理后的图"""
@@ -1416,10 +1501,10 @@ class App:
             self.preview_result = None
             self.image_canvas.delete('all')
             self._render_static(img)
-            print(f"  [预览] 查看处理后结果: {Path(path).name}")
+            print(f"  {self._t('log_preview')} " + self._t('view_processed', name=Path(path).name))
             self._update_status_bar()
         except Exception as e:
-            print(f"  [错误] 预览失败: {e}")
+            print(f"  {self._t('log_error')} " + self._t('preview_failed', e=e))
 
     def _render_static(self, cv2_img):
         """仅渲染图片，不涉及标记点（用于结果预览）"""
@@ -1442,7 +1527,7 @@ class App:
         if self.original_img is not None and self.current_idx >= 0:
             self._display_cv2_image(self.original_img)
         if not silent:
-            print("  [退回] 已返回原图")
+            print(f"  {self._t('log_back')} " + self._t('returned_original'))
         self._update_status_bar()
 
     def prev_image(self):
@@ -1451,7 +1536,7 @@ class App:
         if self.current_idx > 0:
             self._show_image(self.current_idx - 1)
         else:
-            print("  [提示] 已经是第一张")
+            print(f"  {self._t('log_tip')} " + self._t('first_image'))
 
     def next_image(self):
         if self.viewing_result:
@@ -1459,7 +1544,7 @@ class App:
         if self.current_idx < len(self.image_list) - 1:
             self._show_image(self.current_idx + 1)
         else:
-            print("  [完成] 已到最后一张图片")
+            print(f"  {self._t('log_done')} " + self._t('last_image'))
             self._update_status_bar()
 
     def _next_unprocessed(self, start):
@@ -1474,31 +1559,31 @@ class App:
         if nxt >= 0:
             self._show_image(nxt)
         else:
-            print("  [完成] 已到末尾，后面没有未处理的图了")
+            print(f"  {self._t('log_done')} " + self._t('no_more_unprocessed'))
             self._update_status_bar()
 
     # ============================== 导出 / 打开文件夹 ==============================
 
     def open_output_folder(self):
         if not self.output_dir or not Path(self.output_dir).exists():
-            print("  [提示] 还没有已保存的图片")
+            print(f"  {self._t('log_tip')} " + self._t('no_processed_images'))
             return
         try:
             os.startfile(self.output_dir)
         except Exception as e:
-            print(f"  [错误] 打开文件夹失败: {e}")
+            print(f"  {self._t('log_error')} " + self._t('open_folder_failed', e=e))
 
     def do_export(self, fmt):
         if not self.output_dir or not Path(self.output_dir).exists():
-            print("  [提示] 还没有处理过的图片，请先裁剪或矫正")
+            print(f"  {self._t('log_tip')} " + self._t('no_processed_to_export'))
             return
         has = any(f.lower().endswith('.png')
                   for _, _, files in os.walk(self.output_dir) for f in files)
         if not has:
-            print("  [提示] 还没有处理过的图片，请先裁剪或矫正")
+            print(f"  {self._t('log_tip')} " + self._t('no_processed_to_export'))
             return
 
-        out_dir = filedialog.askdirectory(title="选择导出位置")
+        out_dir = filedialog.askdirectory(title=self._t('choose_export_location'))
         if not out_dir:
             return
 
@@ -1508,7 +1593,7 @@ class App:
             self.running = True
             self.root.after(0, self._disable_buttons)
             try:
-                print(f"  [导出] {fmt_name} -> {out_dir}")
+                print(f"  {self._t('log_export')} " + self._t('export_done', fmt_name=fmt_name, out_dir=out_dir))
                 if fmt == 'ppt':
                     export.export_ppt(self.output_dir, out_dir)
                 elif fmt == 'pdf':
@@ -1516,7 +1601,7 @@ class App:
                 elif fmt == 'word':
                     export.export_word(self.output_dir, out_dir)
             except Exception as e:
-                print(f"  [错误] {e}")
+                print(f"  {self._t('log_error')} {e}")
                 import traceback
                 traceback.print_exc()
             finally:
@@ -1537,7 +1622,7 @@ class App:
 
     def _on_close(self):
         if self.running:
-            messagebox.showinfo("请稍候", "批量处理正在进行中，请等待完成后再退出。")
+            messagebox.showinfo(self._t('batch_running_title'), self._t('batch_running_msg'))
             return
         if not self.session_outputs:
             self.root.destroy()
@@ -1574,22 +1659,20 @@ class App:
                 os.rmdir(self.output_dir)
         except Exception:
             pass
-        print(f"  [重置] 已删除本次处理的 {removed} 张成品")
+        print(f"  {self._t('log_reset')} " + self._t('deleted_outputs', count=removed))
 
     def _confirm_exit(self, count):
         """退出确认对话框，返回 'save' / 'discard' / 'cancel'。"""
         win = tk.Toplevel(self.root)
-        win.title("退出确认")
+        win.title(self._t('exit_confirm_title'))
         win.configure(bg=BG_MAIN)
         win.transient(self.root)
         win.resizable(False, False)
         result = {'v': 'cancel'}
 
-        tk.Label(win, text="确定要退出吗？", font=FONT_TITLE, fg=ACCENT, bg=BG_MAIN
+        tk.Label(win, text=self._t('exit_confirm_message'), font=FONT_TITLE, fg=ACCENT, bg=BG_MAIN
                  ).pack(anchor='w', padx=24, pady=(20, 6))
-        msg = (f"本次已处理并保存 {count} 张成品到：\n{self.output_dir}\n\n"
-               "· 保存并退出：保留这些成品\n"
-               "· 不保存并退出：删除本次处理生成的成品（之前已存在的不受影响）")
+        msg = self._t('processed_saved_to', count=count, output_dir=self.output_dir) + self._t('exit_keep_desc') + self._t('exit_discard_desc')
         tk.Label(win, text=msg, font=FONT_MAIN, fg=TEXT_MAIN, bg=BG_MAIN, justify='left'
                  ).pack(anchor='w', padx=24, pady=(0, 16))
 
@@ -1600,13 +1683,13 @@ class App:
             result['v'] = v
             win.destroy()
 
-        ttk.Button(btnrow, text="  取消  ", command=lambda: choose('cancel')
+        ttk.Button(btnrow, text=self._t('cancel'), command=lambda: choose('cancel')
                    ).pack(side='right')
-        tk.Button(btnrow, text=f"  不保存并退出（删除本次 {count} 张成品）  ",
+        tk.Button(btnrow, text=self._t('exit_discard', count=count),
                   font=FONT_MAIN, fg='#0b0d12', bg=RED, activebackground='#fca5a5',
                   bd=0, padx=12, pady=6, cursor='hand2',
                   command=lambda: choose('discard')).pack(side='right', padx=(0, 8))
-        ttk.Button(btnrow, text="  保存并退出  ", style='Accent.TButton',
+        ttk.Button(btnrow, text=self._t('exit_save_keep'), style='Accent.TButton',
                    command=lambda: choose('save')).pack(side='right', padx=(0, 8))
 
         win.update_idletasks()
