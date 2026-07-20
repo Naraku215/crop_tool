@@ -125,6 +125,10 @@ class Tooltip:
         self._cancel()
         self._after = self.widget.after(self.delay, self._show)
 
+    def set_text(self, text):
+        """更新提示文本（下次悬停时生效）。"""
+        self.text = text
+
     def _cancel(self):
         if self._after is not None:
             self.widget.after_cancel(self._after)
@@ -195,6 +199,7 @@ class App:
         self.i18n = I18n(lang=settings.get('language', 'zh'))
         self._t = self.i18n.t
         self._translatable = []  # (widget_or_callable, key, kwargs)
+        self._tooltips = []      # (tooltip, key)
 
         # 交互开关（可在动作条即时切换）
         self.auto_carry = tk.BooleanVar(value=False)  # 自动沿用上一张标记点（默认关）
@@ -305,6 +310,15 @@ class App:
         # 动态刷新状态栏、帮助等
         self._update_status_bar()
         self._show_canvas_hint()
+        # 刷新工具提示文本（下次悬停生效）
+        for tip, key in self._tooltips:
+            tip.set_text(self._t(key))
+        # 刷新动态计数标签（缩略图统计 / 已处理结果计数）
+        self.thumb_status.config(text=self._t('status_total',
+                                              total=len(self.image_list),
+                                              processed=len(self.processed_set)))
+        self.result_status.config(text=self._t('processed_result_count',
+                                               count=len(self.result_data)))
         # 刷新窗口标题
         self.root.title(f"crop_tool {VERSION}")
 
@@ -425,13 +439,13 @@ class App:
         self._tr_widget(self.btn_suggest, 'btn_suggest')
         self.btn_suggest.pack(side='left', padx=(5, 0))
 
-        Tooltip(self.btn_clear, self._t('tip_clear'))
-        Tooltip(self.btn_save, self._t('tip_save'))
-        Tooltip(self.btn_skip, self._t('tip_skip'))
-        Tooltip(self.btn_prev, self._t('tip_prev'))
-        Tooltip(self.btn_next, self._t('tip_next'))
-        Tooltip(self.btn_apply, self._t('tip_apply'))
-        Tooltip(self.btn_suggest, self._t('tip_suggest'))
+        self._tooltips.append((Tooltip(self.btn_clear, self._t('tip_clear')), 'tip_clear'))
+        self._tooltips.append((Tooltip(self.btn_save, self._t('tip_save')), 'tip_save'))
+        self._tooltips.append((Tooltip(self.btn_skip, self._t('tip_skip')), 'tip_skip'))
+        self._tooltips.append((Tooltip(self.btn_prev, self._t('tip_prev')), 'tip_prev'))
+        self._tooltips.append((Tooltip(self.btn_next, self._t('tip_next')), 'tip_next'))
+        self._tooltips.append((Tooltip(self.btn_apply, self._t('tip_apply')), 'tip_apply'))
+        self._tooltips.append((Tooltip(self.btn_suggest, self._t('tip_suggest')), 'tip_suggest'))
 
         # 辅助开关独立一行，左对齐，任意宽度均完整可见
         tbar = ttk.Frame(center)
@@ -443,13 +457,15 @@ class App:
         self.btn_magnet.pack(side='left', padx=(0, 8))
         self.btn_carry = self._make_toggle(tbar, 'carry_over_last', self.auto_carry)
         self.btn_carry.pack(side='left', padx=(0, 8))
-        Tooltip(self.btn_magnet, self._t('tip_magnet'))
-        Tooltip(self.btn_carry, self._t('tip_carry'))
+        self._tooltips.append((Tooltip(self.btn_magnet, self._t('tip_magnet')), 'tip_magnet'))
+        self._tooltips.append((Tooltip(self.btn_carry, self._t('tip_carry')), 'tip_carry'))
 
         # 右：已处理
         right = ttk.Frame(main)
         main.add(right, weight=0)
-        ttk.Label(right, text="已处理结果", style='Hdr.TLabel').pack(anchor='w', pady=(0, 5))
+        lbl_processed = ttk.Label(right, text="", style='Hdr.TLabel')
+        self._tr_widget(lbl_processed, 'processed_result')
+        lbl_processed.pack(anchor='w', pady=(0, 5))
         rc = ttk.Frame(right)
         rc.pack(fill='both', expand=True)
         self.result_canvas = tk.Canvas(rc, width=200, bg=BG_PANEL, highlightthickness=0, bd=0)
@@ -527,6 +543,11 @@ class App:
         btn = ttk.Button(parent)
         btn.configure(command=lambda: self._toggle_var(btn, label_key, var))
         self._refresh_toggle(btn, label_key, var)
+        # 注册语言刷新回调（忽略传入的 text 参数，按当前 var 状态重建文案与样式）
+        self._translatable.append(
+            (lambda _text=None, b=btn, k=label_key, v=var: self._refresh_toggle(b, k, v),
+             label_key, {})
+        )
         return btn
 
     def _toggle_var(self, btn, label_key, var):
@@ -752,7 +773,7 @@ class App:
         self.current_idx = -1
         self.original_img = None
         self.image_canvas.delete('all')
-        self.result_status.config(text="共 0 张")
+        self.result_status.config(text=self._t('processed_result_count', count=0))
 
         all_images = scan_images(folder)
         # 排除输出目录自身
