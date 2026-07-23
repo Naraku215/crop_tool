@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import config
+from utils import get_sort_key
 
 
 def get_original_stem_from_png(png_filename):
@@ -23,6 +24,45 @@ def get_original_stem_from_png(png_filename):
     if match:
         return match.group(1)
     return Path(png_filename).stem
+
+
+def compare_folder(orig_paths, png_paths):
+    """比较原图路径列表与 PNG 路径列表的数量和顺序。
+
+    两侧均使用 utils.get_sort_key 排序，与 GUI 扫描、export 导出口径一致，
+    确保校验的是"输入顺序 == 输出顺序"这一核心不变量。
+
+    参数:
+        orig_paths: 原图完整路径列表
+        png_paths: 处理后 PNG 完整路径列表
+
+    返回:
+        dict: {orig_count, crop_count, status, orig_stems, crop_stems}
+        status ∈ {'perfect', 'order_mismatch', 'count_mismatch'}
+    """
+    orig_sorted = sorted(orig_paths, key=get_sort_key)
+    png_sorted = sorted(png_paths, key=get_sort_key)
+
+    orig_stems = [Path(p).stem.lower() for p in orig_sorted]
+    crop_stems = [get_original_stem_from_png(Path(p).name).lower() for p in png_sorted]
+
+    orig_count = len(orig_stems)
+    crop_count = len(crop_stems)
+
+    if orig_count != crop_count:
+        status = "count_mismatch"
+    elif orig_stems == crop_stems:
+        status = "perfect"
+    else:
+        status = "order_mismatch"
+
+    return {
+        "orig_count": orig_count,
+        "crop_count": crop_count,
+        "status": status,
+        "orig_stems": orig_stems,
+        "crop_stems": crop_stems,
+    }
 
 
 def check_folders(input_dir, processed_dir):
@@ -63,32 +103,34 @@ def check_folders(input_dir, processed_dir):
         print(f"\n  检查文件夹: [{rel_path}]")
 
         img_full_paths = [os.path.join(root, file) for file in image_files]
-        img_full_paths.sort(key=lambda x: os.path.getmtime(x))
-        orig_sequence = [Path(file).stem.lower() for file in img_full_paths]
-        orig_count = len(orig_sequence)
-        total_orig_images += orig_count
+        total_orig_images += len(img_full_paths)
 
         if not current_crop_dir.exists():
             print(f"   [错误] 找不到对应的处理后文件夹！")
             error_folders += 1
             continue
 
-        png_files = [file for file in os.listdir(current_crop_dir) if file.lower().endswith('.png')]
-        png_files.sort()
-        crop_sequence = [get_original_stem_from_png(file).lower() for file in png_files]
-        crop_count = len(crop_sequence)
-        total_crop_images += crop_count
+        png_full_paths = [
+            os.path.join(current_crop_dir, file)
+            for file in os.listdir(current_crop_dir)
+            if file.lower().endswith('.png')
+        ]
+        total_crop_images += len(png_full_paths)
+
+        result = compare_folder(img_full_paths, png_full_paths)
+        orig_count = result["orig_count"]
+        crop_count = result["crop_count"]
+        status = result["status"]
 
         print(f"   -> 源文件数: {orig_count} 张 | 处理后数: {crop_count} 张")
 
-        if orig_count == crop_count:
-            if orig_sequence == crop_sequence:
-                print("   [完美] 数量完全一致，且顺序 100% 对应。")
-                perfect_folders += 1
-            else:
-                print("   [错误] 数量虽然一致，但顺序不匹配。")
-                error_folders += 1
-        else:
+        if status == "perfect":
+            print("   [完美] 数量完全一致，且顺序 100% 对应。")
+            perfect_folders += 1
+        elif status == "order_mismatch":
+            print("   [错误] 数量虽然一致，但顺序不匹配。")
+            error_folders += 1
+        else:  # count_mismatch
             print(f"   [警告] 数量不一致 (处理图少了 {orig_count - crop_count} 张)。")
             warning_folders += 1
 
