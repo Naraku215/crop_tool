@@ -8,6 +8,18 @@ You have hundreds of recaptured photos — certificates, award plaques, ID cards
 
 ---
 
+## Screenshots
+
+**Mark four corners per image; magnetic snap locks onto real edges**
+
+![Cropping workflow with edge-snap](readme_image/screenshot-crop.png)
+
+**Corrected result and the three-pane workspace**
+
+![Result preview and workspace](readme_image/screenshot-result.png)
+
+---
+
 ## The Problem It Solves
 
 Real-world scenario: you need to crop, straighten, and archive a large batch of recaptured photos, but each image requires a **different, manually specified region**. Existing tools fall short:
